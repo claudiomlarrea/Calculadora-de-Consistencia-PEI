@@ -1,3 +1,4 @@
+
 import io
 import re
 import unicodedata
@@ -9,8 +10,6 @@ import pandas as pd
 import streamlit as st
 from rapidfuzz import fuzz
 from docx import Document
-from docx.shared import Pt
-from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 # ---------------------------
 # Utilidades de limpieza
@@ -33,10 +32,10 @@ def normalize_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-def tokens(s: str) -> List[str]:
+def tokens(s: str):
     return [t for t in normalize_text(s).split() if t and t not in SPANISH_STOPWORDS]
 
-def jaccard(a: List[str], b: List[str]) -> float:
+def jaccard(a, b) -> float:
     sa, sb = set(a), set(b)
     if not sa and not sb:
         return 0.0
@@ -53,7 +52,7 @@ def band(score: float) -> str:
     if pct >= 50: return "Media"
     return "Baja"
 
-def best_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+def best_column(df: pd.DataFrame, candidates):
     best, best_score = None, -1
     for col in df.columns:
         col_norm = normalize_text(col)
@@ -70,6 +69,9 @@ def guess_columns(df: pd.DataFrame):
     col_resp = best_column(df, ["responsable", "responsables", "area responsable"])
     return col_obj, col_act, col_uni, col_resp
 
+def is_blank(x: str) -> bool:
+    return normalize_text(x) == ""
+
 def evaluate(df: pd.DataFrame, col_obj: str, col_act: str, col_uni: Optional[str], col_resp: Optional[str]) -> pd.DataFrame:
     work = df.copy()
     work["_objetivo"] = work[col_obj].astype(str)
@@ -77,9 +79,16 @@ def evaluate(df: pd.DataFrame, col_obj: str, col_act: str, col_uni: Optional[str
     if col_uni: work["_unidad"] = work[col_uni].astype(str)
     if col_resp: work["_responsable"] = work[col_resp].astype(str)
 
+    # Tratar objetivos vacíos: etiquetar y score 0
+    vacio_mask = work["_objetivo"].apply(is_blank)
+    work.loc[vacio_mask, "_objetivo"] = "Sin objetivo (vacío)"
+    # Calcular score normalmente y luego forzar 0 a vacíos
     work["score"] = work.apply(lambda r: combined_score(r["_actividad"], r["_objetivo"]), axis=1)
+    work.loc[work["_objetivo"] == "Sin objetivo (vacío)", "score"] = 0.0
+
     work["consistencia_%"] = (work["score"] * 100).round(1)
     work["nivel"] = work["score"].apply(band)
+
     res_cols = ["consistencia_%","nivel"]
     if col_uni: res_cols.append("_unidad")
     if col_resp: res_cols.append("_responsable")
@@ -92,22 +101,25 @@ def evaluate(df: pd.DataFrame, col_obj: str, col_act: str, col_uni: Optional[str
     })
     return out
 
-def aggregations(out: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def aggregations(out: pd.DataFrame):
     by_unidad = None
     if "Unidad Académica" in out.columns:
         by_unidad = out.groupby("Unidad Académica", dropna=False)["consistencia_%"].agg(["count","mean"]).reset_index()
         by_unidad = by_unidad.rename(columns={"count":"N actividades","mean":"Promedio %"})
         by_unidad["Promedio %"] = by_unidad["Promedio %"].round(1)
-    by_obj = out.groupby("Objetivo específico")["consistencia_%"].agg(["count","mean"]).reset_index()
+    by_obj = out.groupby("Objetivo específico", dropna=False)["consistencia_%"].agg(["count","mean"]).reset_index()
     by_obj = by_obj.rename(columns={"count":"N actividades","mean":"Promedio %"})
     by_obj["Promedio %"] = by_obj["Promedio %"].round(1)
     return by_unidad, by_obj
 
-def generar_informe_word(promedio_general, out_df, resumen_obj, resumen_uni=None):
+def generar_informe_word(promedio_excl, out_df, resumen_obj, resumen_uni=None, n_excluidos=0):
     doc = Document()
     doc.add_heading("Análisis de consistencia de actividades PEI", 0)
     doc.add_paragraph(f"Fecha de generación: {datetime.now().strftime('%d/%m/%Y')}")
-    doc.add_paragraph(f"Promedio general de consistencia: {promedio_general:.1f}%")
+    doc.add_paragraph(f"Promedio general de consistencia (excluye objetivos vacíos): {promedio_excl:.1f}%")
+    if n_excluidos > 0:
+        doc.add_paragraph(f"Actividades con objetivo vacío (marcadas como 'Sin objetivo (vacío)'): {n_excluidos}")
+
     doc.add_heading("Resumen por objetivo específico", level=1)
     t = doc.add_table(rows=1, cols=len(resumen_obj.columns))
     t.style = "Light List Accent 1"
@@ -117,6 +129,7 @@ def generar_informe_word(promedio_general, out_df, resumen_obj, resumen_uni=None
         cells = t.add_row().cells
         for j, col in enumerate(resumen_obj.columns):
             cells[j].text = str(row[col])
+
     if resumen_uni is not None:
         doc.add_heading("Resumen por unidad académica", level=1)
         t2 = doc.add_table(rows=1, cols=len(resumen_uni.columns))
@@ -127,13 +140,15 @@ def generar_informe_word(promedio_general, out_df, resumen_obj, resumen_uni=None
             cells = t2.add_row().cells
             for j, col in enumerate(resumen_uni.columns):
                 cells[j].text = str(row[col])
+
     doc.add_heading("Conclusiones", level=1)
-    if promedio_general >= 75:
-        doc.add_paragraph("El nivel de consistencia global es alto, lo que indica una buena alineación entre las actividades y los objetivos específicos establecidos.")
-    elif promedio_general >= 50:
-        doc.add_paragraph("El nivel de consistencia global es medio, lo que sugiere que existe margen de mejora en la alineación entre las actividades y los objetivos específicos.")
+    if promedio_excl >= 75:
+        doc.add_paragraph("El nivel de consistencia global es alto, con adecuada alineación entre actividades y objetivos específicos.")
+    elif promedio_excl >= 50:
+        doc.add_paragraph("El nivel de consistencia global es medio; se recomienda revisar objetivos con promedios bajos y casos 'Sin objetivo (vacío)'.")
     else:
-        doc.add_paragraph("El nivel de consistencia global es bajo, indicando que muchas actividades no están claramente relacionadas con los objetivos específicos establecidos.")
+        doc.add_paragraph("El nivel de consistencia global es bajo; se sugiere reestructurar actividades para mejorar su contribución a los objetivos específicos.")
+
     buf = io.BytesIO()
     doc.save(buf)
     buf.seek(0)
@@ -172,13 +187,15 @@ if uploaded is not None:
         st.success("¡Listo! Se calculó la consistencia.")
         st.subheader("Resultados por actividad")
         st.dataframe(out)
+
         st.subheader("Resumen por objetivo específico")
         st.dataframe(by_obj)
+
         if by_unidad is not None:
             st.subheader("Resumen por unidad académica")
             st.dataframe(by_unidad)
 
-        # Excel
+        # Excel (incluye todas las filas, marcando vacíos)
         buf_excel = io.BytesIO()
         with pd.ExcelWriter(buf_excel, engine="openpyxl") as writer:
             out.to_excel(writer, index=False, sheet_name="Resultados_actividades")
@@ -187,15 +204,21 @@ if uploaded is not None:
                 by_unidad.to_excel(writer, index=False, sheet_name="Resumen_unidades")
         st.download_button("⬇️ Descargar resultados en Excel", data=buf_excel.getvalue(), file_name="consistencia_actividades_pei.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+        # Promedio excluyendo "Sin objetivo (vacío)"
+        mask_valid = out["Objetivo específico"] != "Sin objetivo (vacío)"
+        n_excluidos = int((~mask_valid).sum())
+        promedio_excl = float(out.loc[mask_valid, "consistencia_%"].mean()) if mask_valid.any() else 0.0
+
         # Word
-        promedio_general = out["consistencia_%"].mean()
-        buf_word = generar_informe_word(promedio_general, out, by_obj, by_unidad)
+        buf_word = generar_informe_word(promedio_excl, out, by_obj, by_unidad, n_excluidos=n_excluidos)
         st.download_button("⬇️ Descargar informe en Word", data=buf_word, file_name="informe_consistencia_pei.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
         # Métricas globales
         st.subheader("Indicadores globales")
-        st.metric("Promedio general de consistencia", f"{promedio_general:.1f}%")
-        st.metric("Actividades evaluadas", f"{len(out):,}".replace(",", "."))
+        st.metric("Promedio general (excluye vacíos)", f"{promedio_excl:.1f}%")
+        st.metric("Actividades evaluadas", f"{int(mask_valid.sum()):,}".replace(",", "."))
+        if n_excluidos > 0:
+            st.caption(f"Se excluyeron {n_excluidos} actividades con 'Objetivo específico' vacío (registradas como 'Sin objetivo (vacío)').")
 
 else:
     st.info("Sube el archivo Excel de respuestas para comenzar.")

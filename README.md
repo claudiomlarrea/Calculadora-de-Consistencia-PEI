@@ -1,19 +1,20 @@
+
 # Análisis de consistencia de actividades PEI
 
 Calculadora en Streamlit para estimar la relación entre actividades y objetivos específicos del PEI y generar resultados en **Excel** y un **informe en Word**.
 
+## Novedad
+- Las filas con **Objetivo específico vacío** se marcan como **"Sin objetivo (vacío)"** y reciben **0%**.
+- El **promedio general mostrado y en el Word excluye** esas filas para no sesgar el resultado.
+- En tablas y Excel quedan registradas para auditoría.
+
 ## Funcionalidades
 - Subir el Excel exportado del Formulario Único para el PEI.
-- Detecta automáticamente columnas clave (objetivo, actividad, unidad, responsable).
-- Calcula un porcentaje de consistencia combinando similitud de texto y solapamiento de palabras clave.
-- Clasifica en Alta, Media o Baja consistencia.
-- Genera:
-  - Tabla por actividad
-  - Resumen por objetivo
-  - Resumen por unidad académica
-- Exporta:
-  - Resultados completos a Excel
-  - Informe resumido en Word con conclusiones automáticas
+- Detección automática de columnas clave (objetivo, actividad, unidad, responsable).
+- Cálculo de porcentaje de consistencia (RapidFuzz + Jaccard).
+- Clasificación: Alta (≥75), Media (50–74), Baja (<50).
+- Resúmenes por objetivo y por unidad.
+- Exportación a Excel y a Word con conclusiones automáticas.
 
 ## Ejecución local
 ```bash
