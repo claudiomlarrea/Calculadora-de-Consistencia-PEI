@@ -23,12 +23,14 @@ SPANISH_STOPWORDS = {
     "podrán","podría","podrían","también","además"
 }
 
+BLANK_TOKENS = {"", "nan", "none", "s d", "sd", "s n d", "s n/d", "n a", "n/a", "no corresponde", "no aplica", "ninguno"}
+
 def normalize_text(s: str) -> str:
     if not isinstance(s, str):
         s = "" if pd.isna(s) else str(s)
     s = s.strip().lower()
     s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
-    s = re.sub(r"[^a-z0-9\s]", " ", s)
+    s = re.sub(r"[^a-z0-9\s/]", " ", s)  # mantener "/" para reconocer "n/a"
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -63,40 +65,84 @@ def best_column(df: pd.DataFrame, candidates):
     return best
 
 def guess_columns(df: pd.DataFrame):
-    col_obj = best_column(df, ["objetivo especifico", "objetivo", "objetivo pei", "objetivo del pei", "objetivo especifico del pei"])
-    col_act = best_column(df, ["actividad", "acciones", "descripcion de la actividad", "accion", "actividad prevista"])
+    col_obj_text = best_column(df, [
+        "objetivo especifico", "objetivo", "objetivo pei", "objetivo del pei",
+        "objetivo especifico del pei", "objetivo especifico al que tributa",
+        "objetivo especifico seleccionado", "objetivo especifico (texto)"
+    ])
+    col_obj_code = best_column(df, [
+        "codigo objetivo", "código objetivo", "id objetivo", "objetivo (codigo)",
+        "objetivo n", "objetivo numero", "objetivo nro"
+    ])
+    col_act = best_column(df, ["actividad", "acciones", "descripcion de la actividad", "accion", "actividad prevista", "actividad cargada"])
     col_uni = best_column(df, ["unidad academica", "unidad", "facultad", "instituto", "secretaria"])
     col_resp = best_column(df, ["responsable", "responsables", "area responsable"])
-    return col_obj, col_act, col_uni, col_resp
+    return col_obj_text, col_obj_code, col_act, col_uni, col_resp
 
 def is_blank(x) -> bool:
-    # Trata NaN/None/"nan"/"none" como vacío
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return True
     s = normalize_text(str(x))
-    return s in ("", "nan", "none")
+    return s in BLANK_TOKENS
 
 def to_clean_str_series(s: pd.Series) -> pd.Series:
-    # Evita "nan" string: primero fillna(""), luego str
     return s.fillna("").astype(str)
 
-def evaluate(df: pd.DataFrame, col_obj: str, col_act: str, col_uni: Optional[str], col_resp: Optional[str]) -> pd.DataFrame:
+def make_objective(text_col: pd.Series, code_col: Optional[pd.Series]) -> pd.Series:
+    text_clean = to_clean_str_series(text_col)
+    if code_col is None:
+        return text_clean
+    code_clean = to_clean_str_series(code_col).str.strip()
+    have_code = ~code_clean.eq("")
+    combined = text_clean.copy()
+    combined.loc[have_code] = code_clean.loc[have_code] + " - " + text_clean.loc[have_code]
+    return combined
+
+def forward_fill_objectives(df: pd.DataFrame, obj_col: str, group_cols: list) -> pd.DataFrame:
+    df = df.copy()
+    if group_cols:
+        df[obj_col] = df[obj_col].replace("", np.nan)
+        df[obj_col] = df.groupby(group_cols, dropna=False)[obj_col].ffill()
+    else:
+        df[obj_col] = df[obj_col].replace("", np.nan).ffill()
+    df[obj_col] = df[obj_col].fillna("")
+    return df
+
+def back_fill_objectives(df: pd.DataFrame, obj_col: str, group_cols: list) -> pd.DataFrame:
+    df = df.copy()
+    if group_cols:
+        df[obj_col] = df[obj_col].replace("", np.nan)
+        df[obj_col] = df.groupby(group_cols, dropna=False)[obj_col].bfill()
+    else:
+        df[obj_col] = df[obj_col].replace("", np.nan).bfill()
+    df[obj_col] = df[obj_col].fillna("")
+    return df
+
+def evaluate(df: pd.DataFrame, col_obj_text: str, col_obj_code: Optional[str], col_act: str, col_uni: Optional[str], col_resp: Optional[str],
+             use_ffill: bool, use_bfill: bool, group_cols: list) -> pd.DataFrame:
     work = df.copy()
 
-    # Convertimos a string *sin* crear "nan"
-    obj_series = to_clean_str_series(work[col_obj])
-    act_series = to_clean_str_series(work[col_act])
+    # Construir objetivo (posible código + texto)
+    objetivo_series = make_objective(work[col_obj_text], work[col_obj_code] if col_obj_code else None)
+    actividad_series = to_clean_str_series(work[col_act])
 
-    work["_objetivo"] = obj_series
-    work["_actividad"] = act_series
+    work["_objetivo"] = objetivo_series
+    work["_actividad"] = actividad_series
     if col_uni: work["_unidad"] = to_clean_str_series(work[col_uni])
     if col_resp: work["_responsable"] = to_clean_str_series(work[col_resp])
 
-    # Tratar objetivos vacíos
+    # Completar vacíos
+    group_cols_valid = [c for c in group_cols if c in work.columns]
+    if use_ffill:
+        work = forward_fill_objectives(work, "_objetivo", group_cols_valid)
+    if use_bfill:
+        work = back_fill_objectives(work, "_objetivo", group_cols_valid)
+
+    # Marcar vacíos
     vacio_mask = work["_objetivo"].apply(is_blank)
     work.loc[vacio_mask, "_objetivo"] = "Sin objetivo (vacío)"
 
-    # Calcular score y forzar 0 para vacíos
+    # Score
     work["score"] = work.apply(lambda r: combined_score(r["_actividad"], r["_objetivo"]), axis=1)
     work.loc[work["_objetivo"] == "Sin objetivo (vacío)", "score"] = 0.0
 
@@ -126,11 +172,49 @@ def aggregations(out: pd.DataFrame):
     by_obj["Promedio %"] = by_obj["Promedio %"].round(1)
     return by_unidad, by_obj
 
-def generar_informe_word(promedio_excl, out_df, resumen_obj, resumen_uni=None, n_excluidos=0):
+def best_suggestion(activity: str, current_obj: str, candidates: List[str]) -> Tuple[str, float]:
+    # Devuelve (objetivo_sugerido, score%) evitando "Sin objetivo" y priorizando el mejor distinto al actual
+    best_obj, best_sc = "", -1.0
+    second_obj, second_sc = "", -1.0
+    for obj in candidates:
+        sc = combined_score(activity, obj) * 100.0
+        if sc > best_sc:
+            second_obj, second_sc = best_obj, best_sc
+            best_obj, best_sc = obj, sc
+        elif sc > second_sc:
+            second_obj, second_sc = obj, sc
+    # Si el mejor es el mismo que el actual, usar el segundo
+    if best_obj == current_obj and second_obj:
+        return second_obj, second_sc
+    return best_obj, best_sc
+
+def build_inconsistencies(out: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    # Filtra "inconsistentes" por debajo del umbral y sugiere objetivo
+    df = out.copy()
+    df["is_inconsistente"] = df["consistencia_%"] < threshold
+    inc = df[df["is_inconsistente"]].copy()
+    # Candidatos de objetivos
+    candidates = sorted([o for o in df["Objetivo específico"].dropna().unique().tolist() if o != "Sin objetivo (vacío)"])
+    if not candidates:
+        inc["Objetivo sugerido"] = ""
+        inc["Similitud sugerida %"] = np.nan
+        return inc
+    sugeridos, sim_scores = [], []
+    for _, r in inc.iterrows():
+        sug, sc = best_suggestion(r["Actividad"], r["Objetivo específico"], candidates)
+        sugeridos.append(sug)
+        sim_scores.append(round(sc, 1))
+    inc["Objetivo sugerido"] = sugeridos
+    inc["Similitud sugerida %"] = sim_scores
+    return inc
+
+def generar_informe_word(promedio_excl, out_df, resumen_obj, resumen_uni=None, n_excluidos=0, ffill_info="", inconsistentes: Optional[pd.DataFrame]=None, threshold: float=50.0):
     doc = Document()
     doc.add_heading("Análisis de consistencia de actividades PEI", 0)
     doc.add_paragraph(f"Fecha de generación: {datetime.now().strftime('%d/%m/%Y')}")
     doc.add_paragraph(f"Promedio general de consistencia (excluye objetivos vacíos): {promedio_excl:.1f}%")
+    if ffill_info:
+        doc.add_paragraph(ffill_info)
     if n_excluidos > 0:
         doc.add_paragraph(f"Actividades con objetivo vacío (marcadas como 'Sin objetivo (vacío)'): {n_excluidos}")
 
@@ -155,6 +239,24 @@ def generar_informe_word(promedio_excl, out_df, resumen_obj, resumen_uni=None, n
             for j, col in enumerate(resumen_uni.columns):
                 cells[j].text = str(row[col])
 
+    # Sección de inconsistencias
+    if inconsistentes is not None and len(inconsistentes) > 0:
+        doc.add_heading(f"Actividades inconsistentes (umbral {threshold:.0f}%) y sugerencia de vinculación", level=1)
+        cols = ["Unidad Académica","Actividad","Objetivo específico","consistencia_%","Objetivo sugerido","Similitud sugerida %"]
+        cols_presentes = [c for c in cols if c in inconsistentes.columns]
+        table = doc.add_table(rows=1, cols=len(cols_presentes))
+        table.style = "Light List Accent 2"
+        for j, col in enumerate(cols_presentes):
+            table.cell(0, j).text = col
+        for _, row in inconsistentes.iterrows():
+            cells = table.add_row().cells
+            for j, col in enumerate(cols_presentes):
+                text = str(row[col])
+                # recortar actividad larga para mantener manejable el Word
+                if col == "Actividad" and len(text) > 300:
+                    text = text[:300] + "..."
+                cells[j].text = text
+
     doc.add_heading("Conclusiones", level=1)
     if promedio_excl >= 75:
         doc.add_paragraph("El nivel de consistencia global es alto, con adecuada alineación entre actividades y objetivos específicos.")
@@ -177,32 +279,68 @@ st.caption("Calculadora para estimar el grado de relación entre **actividades**
 
 uploaded = st.file_uploader("Sube el Excel con las respuestas del *Formulario Único para el PEI*", type=["xlsx","xls"])
 
+df = None
 if uploaded is not None:
-    df = pd.read_excel(uploaded)
+    # Selector de hoja si hay varias
+    try:
+        xls = pd.ExcelFile(uploaded)
+        if len(xls.sheet_names) > 1:
+            sheet = st.selectbox("Selecciona la hoja del Excel", xls.sheet_names, index=0)
+        else:
+            sheet = xls.sheet_names[0]
+        df = pd.read_excel(xls, sheet_name=sheet)
+        st.caption(f"Hoja cargada: **{sheet}**")
+    except Exception:
+        df = pd.read_excel(uploaded)
+
+if df is not None:
     st.subheader("Vista previa")
     st.dataframe(df.head(20))
 
-    col_obj, col_act, col_uni, col_resp = guess_columns(df)
+    col_obj_text, col_obj_code, col_act, col_uni, col_resp = guess_columns(df)
 
-    with st.expander("Asignar columnas (editar si es necesario)"):
+    with st.expander("Asignar columnas y opciones (editar si es necesario)"):
         cols = list(df.columns)
-        col_obj = st.selectbox("Columna de **Objetivo específico**", cols, index=cols.index(col_obj) if col_obj in cols else 0)
+        col_obj_text = st.selectbox("Columna de **Objetivo específico (texto)**", cols, index=cols.index(col_obj_text) if col_obj_text in cols else 0)
+        col_obj_code = st.selectbox("Columna de **Código de objetivo** (opcional)", ["(ninguna)"] + cols, index=(0 if not col_obj_code or col_obj_code not in cols else cols.index(col_obj_code)+1))
         col_act = st.selectbox("Columna de **Actividad**", cols, index=cols.index(col_act) if col_act in cols else 0)
         col_uni = st.selectbox("Columna de **Unidad Académica** (opcional)", ["(ninguna)"] + cols, index=(0 if not col_uni or col_uni not in cols else cols.index(col_uni)+1))
         col_resp = st.selectbox("Columna de **Responsable** (opcional)", ["(ninguna)"] + cols, index=(0 if not col_resp or col_resp not in cols else cols.index(col_resp)+1))
 
+        col_obj_code = None if col_obj_code == "(ninguna)" else col_obj_code
         col_uni = None if col_uni == "(ninguna)" else col_uni
         col_resp = None if col_resp == "(ninguna)" else col_resp
 
+        # Opciones de completar vacíos
+        prev_obj = make_objective(df[col_obj_text], df[col_obj_code] if col_obj_code else None)
+        vacios_prev = int(prev_obj.apply(lambda x: 1 if is_blank(x) else 0).sum())
+        total_prev = int(len(prev_obj))
+        suggest_ffill = (total_prev > 0 and (vacios_prev / total_prev) > 0.1)
+        use_ffill = st.checkbox("Rellenar hacia abajo (forward-fill) los objetivos vacíos", value=suggest_ffill)
+        use_bfill = st.checkbox("Rellenar hacia arriba (backfill) los objetivos vacíos", value=False)
+        group_cols = st.multiselect(
+            "Columnas para agrupar antes de completar (p. ej., Unidad Académica)",
+            options=cols,
+            default=[c for c in ["Unidad Académica", "unidad", "facultad"] if c in cols]
+        )
+
+        threshold = st.slider("Umbral para marcar 'inconsistente' (%)", min_value=0, max_value=100, value=50, step=1)
+
     if st.button("Calcular consistencia"):
-        out = evaluate(df, col_obj, col_act, col_uni, col_resp)
+        out = evaluate(df, col_obj_text, col_obj_code, col_act, col_uni, col_resp, use_ffill, use_bfill, group_cols)
         by_unidad, by_obj = aggregations(out)
 
-        # Aviso si hay demasiados vacíos (posible columna incorrecta)
+        # Diagnóstico
         vacios = int((out["Objetivo específico"] == "Sin objetivo (vacío)").sum())
         total = int(len(out))
-        if total > 0 and vacios / total > 0.2:
-            st.warning(f"Atención: {vacios} de {total} actividades ({vacios/total:.0%}) quedaron como 'Sin objetivo (vacío)'. Verifica que la columna de Objetivo esté bien seleccionada.")
+        with st.expander("Diagnóstico de objetivos vacíos / valores únicos"):
+            st.write(f"Filas totales: {total} | 'Sin objetivo (vacío)': {vacios}")
+            freq = out["Objetivo específico"].value_counts(dropna=False).reset_index()
+            freq.columns = ["Objetivo", "Frecuencia"]
+            st.dataframe(freq.head(50))
+
+        if total > 0 and vacios / total > 0.05:
+            st.warning(f"Quedaron {vacios} de {total} actividades ({vacios/total:.0%}) sin objetivo. Revisa columnas y/o activa forward/backfill por grupos.")
 
         st.success("¡Listo! Se calculó la consistencia.")
         st.subheader("Resultados por actividad")
@@ -229,16 +367,36 @@ if uploaded is not None:
         n_excluidos = int((~mask_valid).sum())
         promedio_excl = float(out.loc[mask_valid, "consistencia_%"].mean()) if mask_valid.any() else 0.0
 
+        # Inconsistencias + sugerencias
+        inconsistentes = build_inconsistencies(out[mask_valid], threshold=threshold)
+
         # Word
-        buf_word = generar_informe_word(promedio_excl, out, by_obj, by_unidad, n_excluidos=n_excluidos)
+        ffill_info = ""
+        if use_ffill or use_bfill:
+            modo = []
+            if use_ffill: modo.append("forward-fill")
+            if use_bfill: modo.append("backfill")
+            modo_txt = " y ".join(modo)
+            if group_cols:
+                ffill_info = f"Se aplicó {modo_txt} de objetivos vacíos agrupando por: {', '.join(group_cols)}."
+            else:
+                ffill_info = f"Se aplicó {modo_txt} de objetivos vacíos sin agrupación."
+
+        buf_word = generar_informe_word(
+            promedio_excl, out, by_obj, by_unidad,
+            n_excluidos=n_excluidos, ffill_info=ffill_info,
+            inconsistentes=inconsistentes, threshold=threshold
+        )
         st.download_button("⬇️ Descargar informe en Word", data=buf_word, file_name="informe_consistencia_pei.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
         # Métricas globales
         st.subheader("Indicadores globales")
         st.metric("Promedio general (excluye vacíos)", f"{promedio_excl:.1f}%")
         st.metric("Actividades evaluadas", f"{int(mask_valid.sum()):,}".replace(",", "."))
+        st.metric("Inconsistentes (por debajo del umbral)", f"{len(inconsistentes):,}".replace(",", "."))
         if n_excluidos > 0:
             st.caption(f"Se excluyeron {n_excluidos} actividades con 'Objetivo específico' vacío (registradas como 'Sin objetivo (vacío)').")
 
 else:
     st.info("Sube el archivo Excel de respuestas para comenzar.")
+
