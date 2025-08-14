@@ -63,26 +63,40 @@ def best_column(df: pd.DataFrame, candidates):
     return best
 
 def guess_columns(df: pd.DataFrame):
-    col_obj = best_column(df, ["objetivo especifico", "objetivo", "objetivo pei"])
-    col_act = best_column(df, ["actividad", "acciones", "descripcion de la actividad", "accion"])
+    col_obj = best_column(df, ["objetivo especifico", "objetivo", "objetivo pei", "objetivo del pei", "objetivo especifico del pei"])
+    col_act = best_column(df, ["actividad", "acciones", "descripcion de la actividad", "accion", "actividad prevista"])
     col_uni = best_column(df, ["unidad academica", "unidad", "facultad", "instituto", "secretaria"])
     col_resp = best_column(df, ["responsable", "responsables", "area responsable"])
     return col_obj, col_act, col_uni, col_resp
 
-def is_blank(x: str) -> bool:
-    return normalize_text(x) == ""
+def is_blank(x) -> bool:
+    # Trata NaN/None/"nan"/"none" como vacío
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return True
+    s = normalize_text(str(x))
+    return s in ("", "nan", "none")
+
+def to_clean_str_series(s: pd.Series) -> pd.Series:
+    # Evita "nan" string: primero fillna(""), luego str
+    return s.fillna("").astype(str)
 
 def evaluate(df: pd.DataFrame, col_obj: str, col_act: str, col_uni: Optional[str], col_resp: Optional[str]) -> pd.DataFrame:
     work = df.copy()
-    work["_objetivo"] = work[col_obj].astype(str)
-    work["_actividad"] = work[col_act].astype(str)
-    if col_uni: work["_unidad"] = work[col_uni].astype(str)
-    if col_resp: work["_responsable"] = work[col_resp].astype(str)
 
-    # Tratar objetivos vacíos: etiquetar y score 0
+    # Convertimos a string *sin* crear "nan"
+    obj_series = to_clean_str_series(work[col_obj])
+    act_series = to_clean_str_series(work[col_act])
+
+    work["_objetivo"] = obj_series
+    work["_actividad"] = act_series
+    if col_uni: work["_unidad"] = to_clean_str_series(work[col_uni])
+    if col_resp: work["_responsable"] = to_clean_str_series(work[col_resp])
+
+    # Tratar objetivos vacíos
     vacio_mask = work["_objetivo"].apply(is_blank)
     work.loc[vacio_mask, "_objetivo"] = "Sin objetivo (vacío)"
-    # Calcular score normalmente y luego forzar 0 a vacíos
+
+    # Calcular score y forzar 0 para vacíos
     work["score"] = work.apply(lambda r: combined_score(r["_actividad"], r["_objetivo"]), axis=1)
     work.loc[work["_objetivo"] == "Sin objetivo (vacío)", "score"] = 0.0
 
@@ -184,6 +198,12 @@ if uploaded is not None:
         out = evaluate(df, col_obj, col_act, col_uni, col_resp)
         by_unidad, by_obj = aggregations(out)
 
+        # Aviso si hay demasiados vacíos (posible columna incorrecta)
+        vacios = int((out["Objetivo específico"] == "Sin objetivo (vacío)").sum())
+        total = int(len(out))
+        if total > 0 and vacios / total > 0.2:
+            st.warning(f"Atención: {vacios} de {total} actividades ({vacios/total:.0%}) quedaron como 'Sin objetivo (vacío)'. Verifica que la columna de Objetivo esté bien seleccionada.")
+
         st.success("¡Listo! Se calculó la consistencia.")
         st.subheader("Resultados por actividad")
         st.dataframe(out)
@@ -195,7 +215,7 @@ if uploaded is not None:
             st.subheader("Resumen por unidad académica")
             st.dataframe(by_unidad)
 
-        # Excel (incluye todas las filas, marcando vacíos)
+        # Excel
         buf_excel = io.BytesIO()
         with pd.ExcelWriter(buf_excel, engine="openpyxl") as writer:
             out.to_excel(writer, index=False, sheet_name="Resultados_actividades")
@@ -204,7 +224,7 @@ if uploaded is not None:
                 by_unidad.to_excel(writer, index=False, sheet_name="Resumen_unidades")
         st.download_button("⬇️ Descargar resultados en Excel", data=buf_excel.getvalue(), file_name="consistencia_actividades_pei.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        # Promedio excluyendo "Sin objetivo (vacío)"
+        # Promedio excluyendo vacíos
         mask_valid = out["Objetivo específico"] != "Sin objetivo (vacío)"
         n_excluidos = int((~mask_valid).sum())
         promedio_excl = float(out.loc[mask_valid, "consistencia_%"].mean()) if mask_valid.any() else 0.0
