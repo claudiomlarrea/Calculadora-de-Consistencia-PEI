@@ -1,9 +1,6 @@
 
 # Análisis de consistencia de actividades PEI UCCuyo
 
-
-# Análisis de consistencia de actividades PEI
-
 Calculadora en Streamlit para estimar la relación entre actividades y objetivos específicos del PEI y generar resultados en **Excel** y un **informe en Word**.
 
 ## Novedades
