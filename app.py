@@ -183,17 +183,14 @@ def best_suggestion(activity: str, current_obj: str, candidates: List[str]) -> T
             best_obj, best_sc = obj, sc
         elif sc > second_sc:
             second_obj, second_sc = obj, sc
-    # Si el mejor es el mismo que el actual, usar el segundo
     if best_obj == current_obj and second_obj:
         return second_obj, second_sc
     return best_obj, best_sc
 
 def build_inconsistencies(out: pd.DataFrame, threshold: float) -> pd.DataFrame:
-    # Filtra "inconsistentes" por debajo del umbral y sugiere objetivo
     df = out.copy()
     df["is_inconsistente"] = df["consistencia_%"] < threshold
     inc = df[df["is_inconsistente"]].copy()
-    # Candidatos de objetivos
     candidates = sorted([o for o in df["Objetivo específico"].dropna().unique().tolist() if o != "Sin objetivo (vacío)"])
     if not candidates:
         inc["Objetivo sugerido"] = ""
@@ -239,7 +236,6 @@ def generar_informe_word(promedio_excl, out_df, resumen_obj, resumen_uni=None, n
             for j, col in enumerate(resumen_uni.columns):
                 cells[j].text = str(row[col])
 
-    # Sección de inconsistencias
     if inconsistentes is not None and len(inconsistentes) > 0:
         doc.add_heading(f"Actividades inconsistentes (umbral {threshold:.0f}%) y sugerencia de vinculación", level=1)
         cols = ["Unidad Académica","Actividad","Objetivo específico","consistencia_%","Objetivo sugerido","Similitud sugerida %"]
@@ -252,7 +248,6 @@ def generar_informe_word(promedio_excl, out_df, resumen_obj, resumen_uni=None, n
             cells = table.add_row().cells
             for j, col in enumerate(cols_presentes):
                 text = str(row[col])
-                # recortar actividad larga para mantener manejable el Word
                 if col == "Actividad" and len(text) > 300:
                     text = text[:300] + "..."
                 cells[j].text = text
@@ -281,7 +276,6 @@ uploaded = st.file_uploader("Sube el Excel con las respuestas del *Formulario Ú
 
 df = None
 if uploaded is not None:
-    # Selector de hoja si hay varias
     try:
         xls = pd.ExcelFile(uploaded)
         if len(xls.sheet_names) > 1:
@@ -311,7 +305,6 @@ if df is not None:
         col_uni = None if col_uni == "(ninguna)" else col_uni
         col_resp = None if col_resp == "(ninguna)" else col_resp
 
-        # Opciones de completar vacíos
         prev_obj = make_objective(df[col_obj_text], df[col_obj_code] if col_obj_code else None)
         vacios_prev = int(prev_obj.apply(lambda x: 1 if is_blank(x) else 0).sum())
         total_prev = int(len(prev_obj))
@@ -330,7 +323,6 @@ if df is not None:
         out = evaluate(df, col_obj_text, col_obj_code, col_act, col_uni, col_resp, use_ffill, use_bfill, group_cols)
         by_unidad, by_obj = aggregations(out)
 
-        # Diagnóstico
         vacios = int((out["Objetivo específico"] == "Sin objetivo (vacío)").sum())
         total = int(len(out))
         with st.expander("Diagnóstico de objetivos vacíos / valores únicos"):
@@ -362,15 +354,12 @@ if df is not None:
                 by_unidad.to_excel(writer, index=False, sheet_name="Resumen_unidades")
         st.download_button("⬇️ Descargar resultados en Excel", data=buf_excel.getvalue(), file_name="consistencia_actividades_pei.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        # Promedio excluyendo vacíos
         mask_valid = out["Objetivo específico"] != "Sin objetivo (vacío)"
         n_excluidos = int((~mask_valid).sum())
         promedio_excl = float(out.loc[mask_valid, "consistencia_%"].mean()) if mask_valid.any() else 0.0
 
-        # Inconsistencias + sugerencias
         inconsistentes = build_inconsistencies(out[mask_valid], threshold=threshold)
 
-        # Word
         ffill_info = ""
         if use_ffill or use_bfill:
             modo = []
@@ -389,7 +378,6 @@ if df is not None:
         )
         st.download_button("⬇️ Descargar informe en Word", data=buf_word, file_name="informe_consistencia_pei.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
-        # Métricas globales
         st.subheader("Indicadores globales")
         st.metric("Promedio general (excluye vacíos)", f"{promedio_excl:.1f}%")
         st.metric("Actividades evaluadas", f"{int(mask_valid.sum()):,}".replace(",", "."))
