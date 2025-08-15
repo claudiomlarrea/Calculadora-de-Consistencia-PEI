@@ -1,27 +1,22 @@
 import io
 import re
-from typing import Optional, List
+from typing import Optional, List, Tuple, Dict
 import numpy as np
 import pandas as pd
 import streamlit as st
 from rapidfuzz import fuzz
 
+# ---------------- Utilidades ----------------
 SPANISH_STOPWORDS = {"a","ante","bajo","cabe","con","contra","de","desde","durante","en","entre","hacia","hasta","mediante",
     "para","por","según","sin","so","sobre","tras","el","la","los","las","un","una","unos","unas","y","o","u","e","ni","que",
     "como","al","del","se","su","sus","es","son","ser","estar","esta","este","estos","estas","hay","más","menos","muy","ya",
     "no","sí","si","pero","porque","cuando","donde","cada","lo","le","les","también","además"}
 BLANK_TOKENS = {"", "nan", "none", "s d", "sd", "s n d", "s n/d", "n a", "n/a", "no corresponde", "no aplica", "ninguno"}
 
-def normalize_text(s: str) -> str:
-    if not isinstance(s, str):
-        s = "" if pd.isna(s) else str(s)
-    return s.strip()
-
 def is_blank(x) -> bool:
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return True
-    s = str(x).strip().lower()
-    return s in BLANK_TOKENS
+    return str(x).strip().lower() in BLANK_TOKENS
 
 def to_clean_str_series(s: pd.Series) -> pd.Series:
     return s.fillna("").astype(str)
@@ -30,8 +25,7 @@ def tokens_clean(s: str) -> List[str]:
     s = s.lower()
     s = re.sub(r"[^a-z0-9áéíóúüñ\s\.]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    toks = [t for t in s.split() if t not in SPANISH_STOPWORDS]
-    return toks
+    return [t for t in s.split() if t not in SPANISH_STOPWORDS]
 
 def jaccard(a: List[str], b: List[str]) -> float:
     sa, sb = set(a), set(b)
@@ -44,31 +38,18 @@ def combined_score(activity: str, objective: str) -> float:
     jac = jaccard(tokens_clean(activity), tokens_clean(objective))
     return float(0.6 * t_ratio + 0.4 * jac)
 
-# ---------------------- Limpieza de Objetivo ----------------------
+# -------- Limpieza de “Objetivo” (evita mezclar con actividad/resultado) --------
 code_pattern = re.compile(r"\b\d+(?:\.\d+)+\b")
-
 def extract_goal_segment(text: str) -> str:
-    """
-    Devuelve solo la parte del texto que contiene un 'código' tipo 1.4, 1.5, etc.
-    - Si hay varias partes separadas por '-' u '–', se queda con la ÚLTIMA que contenga el patrón.
-    - Si no encuentra, devuelve el texto original.
-    """
     s = str(text)
     parts = re.split(r"\s[-–—]\s", s)
-    chosen = None
     for part in reversed(parts):
         if code_pattern.search(part):
-            chosen = part.strip()
-            break
-    if chosen:
-        chosen = re.sub(r"\s*[-–—]\s*", " ", chosen).strip()
-        return chosen
+            return re.sub(r"\s*[-–—]\s*", " ", part.strip())
     m = re.search(r"(\d+(?:\.\d+)+\s+[^\n\r]+)$", s)
-    if m:
-        return m.group(1).strip()
-    return s.strip()
+    return m.group(1).strip() if m else s.strip()
 
-# ---------------------- Column detection ----------------------
+# -------- Detección de columnas --------
 def best_column(df: pd.DataFrame, candidates) -> Optional[str]:
     best, best_score = None, -1
     for col in df.columns:
@@ -92,7 +73,7 @@ def guess_columns(df: pd.DataFrame):
     col_group = best_column(df, ["unidad academica", "unidad académica", "facultad", "instituto", "secretaria", "secretaría"])
     return col_obj_text, col_obj_code, col_act, col_act_alt, col_group
 
-# ---------------------- Fill helpers ----------------------
+# -------- Rellenos --------
 def forward_fill_col(df: pd.DataFrame, col: str, group_cols: list) -> pd.DataFrame:
     df = df.copy()
     if group_cols:
@@ -111,15 +92,19 @@ def back_fill_col(df: pd.DataFrame, col: str, group_cols: list) -> pd.DataFrame:
         df[col] = df[col].replace("", np.nan).bfill()
     return df.fillna({col: ""})
 
-# ---------------------- Evaluación ----------------------
+# -------- Evaluación (devuelve resultados + estadísticas de depuración) --------
 def evaluate(df: pd.DataFrame, col_obj_text: str, col_obj_code: Optional[str],
              col_act: str, col_act_alt: Optional[str], group_col: Optional[str],
              use_ffill_goal: bool, use_bfill_goal: bool, use_ffill_act: bool, use_bfill_act: bool,
              use_fallback_activity: bool, combine_code_and_text: bool,
-             clean_goal_text: bool, drop_empty_activity: bool=True, drop_duplicates: bool=True) -> pd.DataFrame:
+             clean_goal_text: bool, keep_empty_activity: bool=True, drop_duplicates: bool=False
+             ) -> Tuple[pd.DataFrame, Dict[str,int]]:
+    stats = {}
+    stats["filas_formulario"] = len(df)
+
     work = df.copy()
 
-    # Objetivo (texto base)
+    # Objetivo base
     objetivo_text = to_clean_str_series(work[col_obj_text])
     if clean_goal_text:
         objetivo_text = objetivo_text.apply(extract_goal_segment)
@@ -130,7 +115,7 @@ def evaluate(df: pd.DataFrame, col_obj_text: str, col_obj_code: Optional[str],
         have_code = ~code_clean.eq("")
         objetivo_text = objetivo_text.mask(have_code, code_clean + " - " + objetivo_text)
 
-    # Actividad
+    # Actividad con fallback
     act_primary = to_clean_str_series(work[col_act])
     if use_fallback_activity and col_act_alt and col_act_alt in work.columns:
         act_alt = to_clean_str_series(work[col_act_alt])
@@ -145,31 +130,51 @@ def evaluate(df: pd.DataFrame, col_obj_text: str, col_obj_code: Optional[str],
     else:
         groups = []
 
-    # Completar vacíos
+    # Rellenos
     if use_ffill_goal: work = forward_fill_col(work, "_objetivo", groups)
     if use_bfill_goal: work = back_fill_col(work, "_objetivo", groups)
     if use_ffill_act:  work = forward_fill_col(work, "_actividad", groups)
     if use_bfill_act:  work = back_fill_col(work, "_actividad", groups)
 
-    # Limpiar
-    if drop_empty_activity:
-        work = work[~work["_actividad"].apply(is_blank)].copy()
-    vacio_mask = work["_objetivo"].apply(is_blank)
-    work.loc[vacio_mask, "_objetivo"] = "Sin objetivo (vacío)"
+    # Contar vacías antes de decidir mantener/eliminar
+    empty_act_mask = work["_actividad"].apply(is_blank)
+    stats["actividades_vacias_detectadas"] = int(empty_act_mask.sum())
+
+    if keep_empty_activity:
+        # marcamos como "(vacía)" y score 0
+        work.loc[empty_act_mask, "_actividad"] = "(vacía)"
+        work["_actividad_es_vacia"] = empty_act_mask
+    else:
+        work = work[~empty_act_mask].copy()
+
+    # Objetivos vacíos -> etiqueta, pero no se descartan
+    vacio_obj_mask = work["_objetivo"].apply(is_blank)
+    stats["objetivos_vacios_detectados"] = int(vacio_obj_mask.sum())
+    work.loc[vacio_obj_mask, "_objetivo"] = "Sin objetivo (vacío)"
+
+    # Duplicados
+    before_dedup = len(work)
     if drop_duplicates:
         work = work.drop_duplicates(subset=["_objetivo","_actividad"], keep="first")
+    stats["duplicados_colapsados"] = before_dedup - len(work)
 
-    # Consistencia
-    work["consistencia_%"] = work.apply(lambda r: round(combined_score(r["_actividad"], r["_objetivo"]) * 100.0, 1), axis=1)
+    # Score
+    work["consistencia_%"] = work.apply(
+        lambda r: 0.0 if ("_actividad_es_vacia" in work.columns and r.get("_actividad_es_vacia", False))
+        else round(combined_score(r["_actividad"], r["_objetivo"]) * 100.0, 1),
+        axis=1
+    )
 
-    return work.rename(columns={"_objetivo":"Objetivo específico","_actividad":"Actividad"})[
+    out = work.rename(columns={"_objetivo":"Objetivo específico","_actividad":"Actividad"})[
         ["Objetivo específico","Actividad","consistencia_%"]
     ]
+    stats["filas_informe"] = len(out)
+    return out, stats
 
-# ---------------------- UI ----------------------
-st.set_page_config(page_title="Análisis de consistencia de actividades PEI – Excel (v6d)", layout="wide")
-st.title("📊 Análisis de consistencia de actividades PEI – Excel (v6d)")
-st.caption("Corrige objetivos mezclados: extrae solo la parte '1.x …' del objetivo. Exporta un único Excel con 4 columnas.")
+# ---------------- UI ----------------
+st.set_page_config(page_title="Análisis de consistencia – Excel (v6e)", layout="wide")
+st.title("📊 Análisis de consistencia de actividades PEI – Excel (v6e)")
+st.caption("Mantiene el conteo original (por defecto). Corrige objetivos mezclados, permite fallback de actividad y muestra diagnóstico del pipeline.")
 
 uploaded = st.file_uploader("Sube el Excel del *Formulario Único para el PEI*", type=["xlsx","xls"])
 
@@ -210,17 +215,17 @@ if df is not None:
         use_ffill_act = st.checkbox("Rellenar **Actividad** hacia abajo (forward-fill)", value=False)
         use_bfill_act = st.checkbox("Rellenar **Actividad** hacia arriba (backfill)", value=False)
 
+        keep_empty_activity = st.checkbox("**Mantener actividades vacías** con 0% (conservar conteo)", value=True)
+        drop_duplicates = st.checkbox("Eliminar **duplicados** (Objetivo, Actividad)", value=False)
+
         group_cols = [col_group] if col_group else []
 
-        drop_empty_activity = st.checkbox("Eliminar filas con **Actividad** vacía", value=True)
-        drop_duplicates = st.checkbox("Eliminar **duplicados** (Objetivo, Actividad)", value=True)
-
     if st.button("Calcular y descargar Excel"):
-        out = evaluate(
+        out, stats = evaluate(
             df, col_obj_text, col_obj_code, col_act, col_act_alt, col_group,
             use_ffill_goal, use_bfill_goal, use_ffill_act, use_bfill_act,
             use_fallback_activity, combine_code_and_text, clean_goal_text,
-            drop_empty_activity=drop_empty_activity, drop_duplicates=drop_duplicates
+            keep_empty_activity=keep_empty_activity, drop_duplicates=drop_duplicates
         )
 
         promedio_global = round(float(out["consistencia_%"].mean()), 1) if len(out) else 0.0
@@ -234,6 +239,17 @@ if df is not None:
         st.success(f"¡Listo! {len(informe)} filas (promedio global: {promedio_global:.1f}%).")
         st.dataframe(informe.head(100))
 
+        with st.expander("Diagnóstico del pipeline"):
+            st.write({
+                "Filas en el formulario": stats["filas_formulario"],
+                "Actividades vacías detectadas": stats["actividades_vacias_detectadas"],
+                "Objetivos vacíos detectados": stats["objetivos_vacios_detectados"],
+                "Duplicados colapsados": stats["duplicados_colapsados"],
+                "Filas en el informe final": stats["filas_informe"],
+            })
+            st.caption("Si el informe trae menos filas que el formulario, desmarca 'Eliminar duplicados' y/o activa el fallback/rellenos.")
+
+        # Excel
         buf_excel = io.BytesIO()
         with pd.ExcelWriter(buf_excel, engine="openpyxl") as writer:
             informe.to_excel(writer, index=False, sheet_name="Informe")
@@ -242,6 +258,7 @@ if df is not None:
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 else:
     st.info("Sube el archivo Excel de respuestas para comenzar.")
+
 
 
 
