@@ -1,6 +1,6 @@
 import io
 import re
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Dict
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -14,10 +14,7 @@ SPANISH_STOPWORDS = {
     "como","al","del","se","su","sus","es","son","ser","estar","esta","este","estos","estas","hay","más","menos","muy","ya",
     "no","sí","si","pero","porque","cuando","donde","cada","lo","le","les","también","además"
 }
-BLANK_TOKENS = {
-    "", "nan", "none", "s d", "sd", "s n d", "s n/d", "n a", "n/a",
-    "no corresponde", "no aplica", "ninguno"
-}
+BLANK_TOKENS = {"", "nan", "none", "s d", "sd", "s n d", "s n/d", "n a", "n/a", "no corresponde", "no aplica", "ninguno"}
 
 def is_blank(x) -> bool:
     if x is None or (isinstance(x, float) and np.isnan(x)):
@@ -44,22 +41,26 @@ def combined_score(activity: str, objective: str) -> float:
     jac = jaccard(tokens_clean(activity), tokens_clean(objective))
     return float(0.6 * t_ratio + 0.4 * jac)
 
-# -------- Limpieza de “Objetivo” --------
-code_pattern = re.compile(r"\b\d+(?:\.\d+)+\b")
+# -------- Limpieza estricta de “Objetivo específico” --------
+CODE_RE = re.compile(r"\d+(?:\.\d+)+")  # p.ej. 1.4, 1.5.2
 
-def extract_goal_segment(text: str) -> str:
+def force_goal_only(text: str) -> str:
     """
-    Devuelve solo la parte del texto que contiene un 'código' tipo 1.4, 1.5, etc.
-    - Si hay varias partes separadas por '-' u '–', se queda con la ÚLTIMA que contenga el patrón.
-    - Si no encuentra, devuelve el texto original.
+    Devuelve exclusivamente el tramo '1.x ...' del objetivo.
+    - Busca el primer match del patrón 1.x en cualquier parte del texto.
+    - Devuelve desde ese match hasta el final de la línea (sin prefijos de actividad/resultado).
+    - Si no hay código, devuelve el texto original (ya limpio).
     """
-    s = str(text)
-    parts = re.split(r"\s[-–—]\s", s)
-    for part in reversed(parts):
-        if code_pattern.search(part):
-            return re.sub(r"\s*[-–—]\s*", " ", part.strip())
-    m = re.search(r"(\d+(?:\.\d+)+\s+[^\n\r]+)$", s)
-    return m.group(1).strip() if m else s.strip()
+    s = str(text).strip()
+    m = CODE_RE.search(s)
+    if not m:
+        return s
+    start = m.start()
+    # desde el código hasta el final; además, si hay separadores ' - ', cortamos lo previo
+    tail = s[start:]
+    # quitar separadores repetidos
+    tail = re.sub(r"\s*[-–—]\s*", " ", tail).strip()
+    return tail
 
 # -------- Detección de columnas --------
 def best_column(df: pd.DataFrame, candidates) -> Optional[str]:
@@ -74,11 +75,11 @@ def best_column(df: pd.DataFrame, candidates) -> Optional[str]:
 
 def guess_columns(df: pd.DataFrame):
     col_obj_text = best_column(df, [
-        "objetivo especifico", "objetivo específico", "objetivo", "objetivo pei", "objetivo del pei",
-        "objetivo especifico al que tributa", "objetivo especifico (texto)"
+        "objetivo especifico", "objetivo específico", "objetivo", "objetivo pei",
+        "objetivo del pei", "objetivo especifico al que tributa", "objetivo especifico (texto)"
     ])
     col_obj_code = best_column(df, [
-        "codigo objetivo", "código objetivo", "id objetivo", "objetivo (codigo)", "objetivo nro", "objetivo numero"
+        "codigo objetivo", "código objetivo", "id objetivo", "objetivo (codigo)","objetivo nro","objetivo numero"
     ])
     col_act = best_column(df, [
         "actividad", "acciones", "descripcion de la actividad", "descripción de la actividad", "actividad cargada"
@@ -116,19 +117,19 @@ def evaluate(
     col_obj_text: str, col_obj_code: Optional[str],
     col_act: str, col_act_alt: Optional[str], group_col: Optional[str],
     use_ffill_goal: bool, use_bfill_goal: bool, use_ffill_act: bool, use_bfill_act: bool,
-    use_fallback_activity: bool, combine_code_and_text: bool, clean_goal_text: bool
+    use_fallback_activity: bool, combine_code_and_text: bool
 ) -> pd.DataFrame:
 
     work = df.copy()
 
-    # Objetivo
-    objetivo_text = to_clean_str_series(work[col_obj_text])
-    if clean_goal_text:
-        objetivo_text = objetivo_text.apply(extract_goal_segment)
+    # Objetivo: SIEMPRE limpiar a '1.x …'
+    objetivo_text = to_clean_str_series(work[col_obj_text]).apply(force_goal_only)
+
+    # NO combinar código + texto por defecto; solo si el usuario lo pide
     if combine_code_and_text and col_obj_code and col_obj_code in work.columns:
         code_clean = to_clean_str_series(work[col_obj_code]).str.strip()
         have_code = ~code_clean.eq("")
-        objetivo_text = objetivo_text.mask(have_code, code_clean + " - " + objetivo_text)
+        objetivo_text = objetivo_text.mask(have_code, code_clean + " " + objetivo_text)
 
     # Actividad con fallback
     act_primary = to_clean_str_series(work[col_act])
@@ -151,21 +152,20 @@ def evaluate(
     if use_ffill_act:  work = forward_fill_col(work, "_actividad", groups)
     if use_bfill_act:  work = back_fill_col(work, "_actividad", groups)
 
-    # Marcar objetivos vacíos y ELIMINARLOS del resultado (requisito)
+    # Marcar objetivos vacíos y ELIMINARLOS (requisito)
     vacio_obj_mask = work["_objetivo"].apply(is_blank)
     work.loc[vacio_obj_mask, "_objetivo"] = "Sin objetivo (vacío)"
     work = work[work["_objetivo"] != "Sin objetivo (vacío)"].copy()
 
-    # Calcular consistencia
+    # Consistencia
     work["consistencia_%"] = work.apply(
         lambda r: round(combined_score(r["_actividad"], r["_objetivo"]) * 100.0, 1),
         axis=1
     )
 
-    out = work.rename(columns={"_objetivo": "Objetivo específico", "_actividad": "Actividad"})[
-        ["Objetivo específico", "Actividad", "consistencia_%"]
+    return work.rename(columns={"_objetivo":"Objetivo específico","_actividad":"Actividad"})[
+        ["Objetivo específico","Actividad","consistencia_%"]
     ]
-    return out
 
 # -------- Informe Word --------
 def generar_informe_word(n_acts: int, promedio: float, dist: Dict[str,int]) -> bytes:
@@ -190,13 +190,13 @@ def generar_informe_word(n_acts: int, promedio: float, dist: Dict[str,int]) -> b
     elif promedio >= 50:
         doc.add_paragraph(
             "El promedio global ubica la consistencia en un nivel intermedio. "
-            "Existen tramos con muy buena alineación y otros con desajustes (p. ej., actividades genéricas, verbos vagos o productos poco definidos). "
+            "Existen tramos con buena alineación y otros con desajustes (actividades genéricas o productos poco definidos). "
             "Conviene revisar los objetivos con menor consistencia y ajustar los criterios de vinculación."
         )
     else:
         doc.add_paragraph(
             "La consistencia global es baja; hay señales de desalineación entre lo que se ejecuta y lo que plantean los objetivos específicos. "
-            "Se aconseja reescribir actividades para que expresen de forma explícita el aporte al objetivo (verbo de acción, población/ámbito, producto/entregable y resultado esperado)."
+            "Se aconseja reescribir actividades para que expresen explícitamente el aporte al objetivo (verbo de acción, ámbito/población, entregable y resultado esperado)."
         )
 
     doc.add_heading("Distribución por niveles", level=2)
@@ -205,29 +205,27 @@ def generar_informe_word(n_acts: int, promedio: float, dist: Dict[str,int]) -> b
     t.cell(0,0).text = "Nivel"
     t.cell(0,1).text = "N actividades"
     for k in ["Alta (>=75%)","Media (50–74%)","Baja (<50%)"]:
-        r = t.add_row().cells
-        r[0].text = k
-        r[1].text = str(dist.get(k,0))
+        row = t.add_row().cells
+        row[0].text = k
+        row[1].text = str(dist.get(k,0))
 
     doc.add_heading("Recomendaciones", level=1)
-    recs = [
-        "Usar verbos operativos y un objeto claro en la redacción de actividades (ej.: 'Implementar', 'Diseñar', 'Capacitar a ... en ...').",
-        "Asegurar que cada actividad mencione el entregable o resultado esperado (producto) y el ámbito/población objetivo.",
-        "Evitar actividades duplicadas o muy genéricas; agruparlas como líneas de trabajo con sub-tareas medibles.",
-        "Revisar los objetivos con mayor proporción de actividades en nivel 'Baja' para realinear la cartera."
-    ]
-    for r in recs:
+    for r in [
+        "Usar verbos operativos y objeto claro en la redacción de actividades.",
+        "Mencionar el entregable/resultado y el ámbito/población objetivo.",
+        "Evitar actividades duplicadas o genéricas; agruparlas como líneas con sub-tareas medibles.",
+        "Revisar los objetivos con mayor proporción en nivel 'Baja' para realinear la cartera."
+    ]:
         doc.add_paragraph("• " + r)
 
     buf = io.BytesIO()
-    doc.save(buf)
-    buf.seek(0)
+    doc.save(buf); buf.seek(0)
     return buf.getvalue()
 
 # ---------------- UI ----------------
-st.set_page_config(page_title="Análisis de consistencia – Excel+Word (v7)", layout="wide")
-st.title("📊 Análisis de consistencia de actividades PEI – Excel + Word (v7)")
-st.caption("El informe EXCLUYE filas con 'Sin objetivo (vacío)'. Incluye un Word con conclusiones automáticas.")
+st.set_page_config(page_title="Análisis de consistencia – Excel+Word (v7.1)", layout="wide")
+st.title("📊 Análisis de consistencia de actividades PEI – Excel + Word (v7.1)")
+st.caption("Objetivo específico limpio (solo '1.x …'), exclusión de 'Sin objetivo (vacío)', Excel con 4 columnas e informe Word.")
 
 uploaded = st.file_uploader("Sube el Excel del *Formulario Único para el PEI*", type=["xlsx","xls"])
 
@@ -250,7 +248,7 @@ if df is not None:
     with st.expander("Asignar columnas y opciones"):
         cols = list(df.columns)
         col_obj_text = st.selectbox("**Objetivo específico (texto)**", cols, index=cols.index(col_obj_text) if col_obj_text in cols else 0)
-        col_obj_code = st.selectbox("**Código de objetivo** (opcional)", ["(ninguna)"] + cols, index=(0 if not col_obj_code or col_obj_code not in cols else cols.index(col_obj_code)+1))
+        col_obj_code = st.selectbox("**Código de objetivo** (opcional, no se mezcla por defecto)", ["(ninguna)"] + cols, index=(0 if not col_obj_code or col_obj_code not in cols else cols.index(col_obj_code)+1))
         col_act = st.selectbox("**Actividad (principal)**", cols, index=cols.index(col_act) if col_act in cols else 0)
         col_act_alt = st.selectbox("**Actividad (alternativa/fallback)**", ["(ninguna)"] + cols, index=(0 if not col_act_alt or col_act_alt not in cols else cols.index(col_act_alt)+1))
         col_group = st.selectbox("**Columna de agrupación (opcional)**", ["(ninguna)"] + cols, index=(0 if not col_group or col_group not in cols else cols.index(col_group)+1))
@@ -258,9 +256,7 @@ if df is not None:
         col_obj_code = None if col_obj_code == "(ninguna)" else col_obj_code
         col_act_alt = None if col_act_alt == "(ninguna)" else col_act_alt
         col_group = None if col_group == "(ninguna)" else col_group
-
-        combine_code_and_text = st.checkbox("Combinar **Código + Texto**", value=False)
-        clean_goal_text = st.checkbox("Limpiar **Objetivo** (quedarse solo con '1.x …')", value=True)
+        combine_code_and_text = st.checkbox("Combinar **Código + Objetivo (texto)**", value=False)
 
         use_ffill_goal = st.checkbox("Rellenar **Objetivo** hacia abajo (forward-fill)", value=False)
         use_bfill_goal = st.checkbox("Rellenar **Objetivo** hacia arriba (backfill)", value=False)
@@ -273,10 +269,9 @@ if df is not None:
         out = evaluate(
             df, col_obj_text, col_obj_code, col_act, col_act_alt, col_group,
             use_ffill_goal, use_bfill_goal, use_ffill_act, use_bfill_act,
-            use_fallback_activity=True, combine_code_and_text=combine_code_and_text, clean_goal_text=clean_goal_text
+            use_fallback_activity=True, combine_code_and_text=combine_code_and_text
         )
 
-        # Informe Excel (4 columnas)
         promedio_global = round(float(out["consistencia_%"].mean()), 1) if len(out) else 0.0
         informe = pd.DataFrame({
             "Objetivo específico": out["Objetivo específico"],
@@ -292,26 +287,20 @@ if df is not None:
         buf_excel = io.BytesIO()
         with pd.ExcelWriter(buf_excel, engine="openpyxl") as writer:
             informe.to_excel(writer, index=False, sheet_name="Informe")
-        st.download_button(
-            "⬇️ Descargar Informe Excel",
-            data=buf_excel.getvalue(),
-            file_name="informe_consistencia_pei.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        st.download_button("⬇️ Descargar Informe Excel", data=buf_excel.getvalue(),
+                           file_name="informe_consistencia_pei.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        # Word (conclusiones)
+        # Word
         alta = int((out["consistencia_%"] >= 75).sum())
         media = int(((out["consistencia_%"] >= 50) & (out["consistencia_%"] < 75)).sum())
         baja = int((out["consistencia_%"] < 50).sum())
         dist = {"Alta (>=75%)": alta, "Media (50–74%)": media, "Baja (<50%)": baja}
 
         word_bytes = generar_informe_word(n_acts=len(out), promedio=promedio_global, dist=dist)
-        st.download_button(
-            "⬇️ Descargar Informe Word (Conclusiones)",
-            data=word_bytes,
-            file_name="conclusiones_consistencia_actividades.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
+        st.download_button("⬇️ Descargar Informe Word (Conclusiones)", data=word_bytes,
+                           file_name="conclusiones_consistencia_actividades.docx",
+                           mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 else:
     st.info("Sube el archivo Excel de respuestas para comenzar.")
 
