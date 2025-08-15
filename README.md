@@ -1,10 +1,9 @@
-# Análisis de consistencia de actividades PEI UCCuyo
+# Análisis de consistencia – Excel + Word (v7.1)
 
-- **Elimina** del análisis todas las filas con **"Sin objetivo (vacío)"**.
-- Genera un **Excel** con 4 columnas (Objetivo, Actividad, % por actividad, Promedio global).
-- Genera un **Word** con: cantidad de actividades, **promedio general** e **interpretación profunda** (bandas alta/media/baja + recomendaciones).
+- **Objetivo específico limpio**: siempre se reduce al tramo que comienza en el código `1.x …`.
+- Se **excluyen** filas con “Sin objetivo (vacío)”.
+- Salida Excel con 4 columnas + **informe Word** (cantidad, promedio e interpretación).
 
 ## Uso
-```bash
 pip install -r requirements.txt
 streamlit run app.py
