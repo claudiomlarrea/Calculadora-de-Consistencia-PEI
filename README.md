@@ -1,19 +1,17 @@
-# Análisis de consistencia de actividades PEI – **Multi-archivo** (v8)
+# Análisis de consistencia de actividades PEI – **Multi-archivo** (v8.1)
 
-La app permite subir **hasta 6 planillas** (CSV/XLSX), una por cada objetivo, por ejemplo:
-- `Plan Estratégico Institucional UCCuyo_Objetivo 1_Tabla.csv`
-- …
-- `Plan Estratégico Institucional UCCuyo_Objetivo 6_Tabla.csv`
+Acepta hasta 6 planillas (CSV/XLSX), consolida y limpia el objetivo (solo `1.x …`), excluye objetivos vacíos, calcula:
 
-## ¿Qué hace?
-- **Detecta** automáticamente las columnas de *Objetivo específico* y *Actividad*.
-- **Limpia** el objetivo para quedarse **solo con el tramo `1.x …`** (evita que se mezclen actividades/resultados).
-- **Excluye** filas con *“Sin objetivo (vacío)”*.
-- Calcula **% de consistencia** por actividad y el **promedio global**.
-- Entrega un **Excel** consolidado:
-  - Hoja **Informe** (4 columnas: Objetivo, Actividad, % actividad, Promedio global).
-  - Hoja **Informe+Fuente** (agrega la columna *Fuente (archivo)* para trazabilidad).
-- Genera un **Word** con conclusiones (cantidad de actividades, promedio global e interpretación por niveles).
+- **Porcentaje de consistencia** por actividad.
+- **Objetivo sugerido (máxima consistencia)** para cada actividad.
+- **Porcentaje de consistencia (sugerido)** y **Diferencia (p.p.)** respecto al objetivo actual.
+
+## Salida
+**Excel** con dos hojas:
+- `Informe`: Objetivo específico, Actividad, **Porcentaje de consistencia**, Objetivo sugerido, **Porcentaje de consistencia (sugerido)**, Diferencia (p.p.), **Porcentaje de consistencia total promedio**.
+- `Informe+Fuente`: lo mismo + columna **Fuente (archivo)** para trazabilidad.
+
+**Word**: conclusiones con cantidad de actividades, promedio global e interpretación por niveles.
 
 ## Uso
 ```bash
