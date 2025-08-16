@@ -1,20 +1,26 @@
 import io
 import re
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
 from rapidfuzz import fuzz
 from docx import Document
 
-# ---------------- Utilidades ----------------
+# ===========================
+# Utilidades y configuración
+# ===========================
 SPANISH_STOPWORDS = {
     "a","ante","bajo","cabe","con","contra","de","desde","durante","en","entre","hacia","hasta","mediante",
     "para","por","según","sin","so","sobre","tras","el","la","los","las","un","una","unos","unas","y","o","u","e","ni","que",
     "como","al","del","se","su","sus","es","son","ser","estar","esta","este","estos","estas","hay","más","menos","muy","ya",
     "no","sí","si","pero","porque","cuando","donde","cada","lo","le","les","también","además"
 }
-BLANK_TOKENS = {"", "nan", "none", "s d", "sd", "s n d", "s n/d", "n a", "n/a", "no corresponde", "no aplica", "ninguno"}
+BLANK_TOKENS = {
+    "", "nan", "none", "s d", "sd", "s n d", "s n/d", "n a", "n/a",
+    "no corresponde", "no aplica", "ninguno", "0", "-", "–", "—", "✓"
+}
+CODE_RE = re.compile(r"\d+(?:\.\d+)+")  # ej. 1.4, 1.5.2
 
 def is_blank(x) -> bool:
     if x is None or (isinstance(x, float) and np.isnan(x)):
@@ -41,28 +47,26 @@ def combined_score(activity: str, objective: str) -> float:
     jac = jaccard(tokens_clean(activity), tokens_clean(objective))
     return float(0.6 * t_ratio + 0.4 * jac)
 
-# -------- Limpieza estricta de “Objetivo específico” --------
-CODE_RE = re.compile(r"\d+(?:\.\d+)+")  # p.ej. 1.4, 1.5.2
-
 def force_goal_only(text: str) -> str:
     """
-    Devuelve exclusivamente el tramo '1.x ...' del objetivo.
-    - Busca el primer match del patrón 1.x en cualquier parte del texto.
-    - Devuelve desde ese match hasta el final de la línea (sin prefijos de actividad/resultado).
-    - Si no hay código, devuelve el texto original (ya limpio).
+    Devuelve exclusivamente el tramo '1.x …' del objetivo.
+    Si no hay código, devuelve el texto original.
     """
     s = str(text).strip()
     m = CODE_RE.search(s)
     if not m:
         return s
-    start = m.start()
-    # desde el código hasta el final; además, si hay separadores ' - ', cortamos lo previo
-    tail = s[start:]
-    # quitar separadores repetidos
+    tail = s[m.start():]
     tail = re.sub(r"\s*[-–—]\s*", " ", tail).strip()
     return tail
 
-# -------- Detección de columnas --------
+def parse_top_objective_from_name(name: str) -> Optional[str]:
+    m = re.search(r"[Oo]bjetivo\s*(\d+)", name)
+    return f"Objetivo {m.group(1)}" if m else None
+
+# ===========================
+# Detección de columnas
+# ===========================
 def best_column(df: pd.DataFrame, candidates) -> Optional[str]:
     best, best_score = None, -1
     for col in df.columns:
@@ -73,102 +77,84 @@ def best_column(df: pd.DataFrame, candidates) -> Optional[str]:
                 best, best_score = col, s
     return best
 
-def guess_columns(df: pd.DataFrame):
-    col_obj_text = best_column(df, [
-        "objetivo especifico", "objetivo específico", "objetivo", "objetivo pei",
-        "objetivo del pei", "objetivo especifico al que tributa", "objetivo especifico (texto)"
+def guess_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
+    # Objetivo específico
+    col_obj = best_column(df, [
+        "objetivo especifico", "objetivo específico", "objetivos especificos", "objetivos específicos",
+        "objetivo", "objetivo pei", "objetivo del pei", "objetivos especificos 1", "objetivos especificos 2",
+        "objetivos específicos 1", "objetivos específicos 2"
     ])
-    col_obj_code = best_column(df, [
-        "codigo objetivo", "código objetivo", "id objetivo", "objetivo (codigo)","objetivo nro","objetivo numero"
-    ])
+    # Actividad
     col_act = best_column(df, [
-        "actividad", "acciones", "descripcion de la actividad", "descripción de la actividad", "actividad cargada"
+        "actividad", "actividades", "acciones", "actividades objetivo", "actividades objetivo 1",
+        "actividad especifica", "actividad específica", "descripcion de la actividad", "descripción de la actividad"
     ])
-    col_act_alt = best_column(df, [
-        "accion", "acción", "tarea", "detalle de actividad", "descripcion", "descripción"
-    ])
-    col_group = best_column(df, [
-        "unidad academica", "unidad académica", "facultad", "instituto", "secretaria", "secretaría"
-    ])
-    return col_obj_text, col_obj_code, col_act, col_act_alt, col_group
+    return col_obj, col_act
 
-# -------- Rellenos --------
-def forward_fill_col(df: pd.DataFrame, col: str, group_cols: list) -> pd.DataFrame:
-    df = df.copy()
-    if group_cols:
-        df[col] = df[col].replace("", np.nan)
-        df[col] = df.groupby(group_cols, dropna=False)[col].ffill()
-    else:
-        df[col] = df[col].replace("", np.nan).ffill()
-    return df.fillna({col: ""})
+# ===========================
+# Carga de archivos (CSV/XLSX)
+# ===========================
+def load_frames_from_upload(uploaded_file) -> List[pd.DataFrame]:
+    """Devuelve una lista de DataFrames (una por archivo/hoja útil)."""
+    frames = []
+    name = getattr(uploaded_file, "name", "archivo")
+    try:
+        if name.lower().endswith(".csv"):
+            df = pd.read_csv(uploaded_file)
+            frames.append(df)
+        else:
+            xls = pd.ExcelFile(uploaded_file)
+            # Elegir la hoja "más prometedora"
+            best_sheet, best_hit = None, -1
+            for sh in xls.sheet_names:
+                tmp = pd.read_excel(xls, sheet_name=sh)
+                col_obj, col_act = guess_columns(tmp)
+                hit = int(col_obj is not None) + int(col_act is not None)
+                if hit > best_hit:
+                    best_hit, best_sheet = hit, sh
+            if best_sheet is None:
+                best_sheet = xls.sheet_names[0]
+            frames.append(pd.read_excel(xls, sheet_name=best_sheet))
+    except Exception:
+        # Fallback a Excel simple
+        frames.append(pd.read_excel(uploaded_file))
+    return frames
 
-def back_fill_col(df: pd.DataFrame, col: str, group_cols: list) -> pd.DataFrame:
-    df = df.copy()
-    if group_cols:
-        df[col] = df[col].replace("", np.nan)
-        df[col] = df.groupby(group_cols, dropna=False)[col].bfill()
-    else:
-        df[col] = df[col].replace("", np.nan).bfill()
-    return df.fillna({col: ""})
+# ===========================
+# Evaluación por DataFrame
+# ===========================
+def evaluate_df(df: pd.DataFrame, top_obj_label: Optional[str], combine_code_and_text: bool=False) -> pd.DataFrame:
+    col_obj, col_act = guess_columns(df)
+    if not col_obj or not col_act:
+        return pd.DataFrame(columns=["Objetivo específico","Actividad","consistencia_%","Fuente (archivo)"])
 
-# -------- Evaluación --------
-def evaluate(
-    df: pd.DataFrame,
-    col_obj_text: str, col_obj_code: Optional[str],
-    col_act: str, col_act_alt: Optional[str], group_col: Optional[str],
-    use_ffill_goal: bool, use_bfill_goal: bool, use_ffill_act: bool, use_bfill_act: bool,
-    use_fallback_activity: bool, combine_code_and_text: bool
-) -> pd.DataFrame:
+    objetivo = to_clean_str_series(df[col_obj]).apply(force_goal_only)
+    actividad = to_clean_str_series(df[col_act])
 
-    work = df.copy()
+    work = pd.DataFrame({
+        "_objetivo": objetivo,
+        "_actividad": actividad
+    })
 
-    # Objetivo: SIEMPRE limpiar a '1.x …'
-    objetivo_text = to_clean_str_series(work[col_obj_text]).apply(force_goal_only)
-
-    # NO combinar código + texto por defecto; solo si el usuario lo pide
-    if combine_code_and_text and col_obj_code and col_obj_code in work.columns:
-        code_clean = to_clean_str_series(work[col_obj_code]).str.strip()
-        have_code = ~code_clean.eq("")
-        objetivo_text = objetivo_text.mask(have_code, code_clean + " " + objetivo_text)
-
-    # Actividad con fallback
-    act_primary = to_clean_str_series(work[col_act])
-    if use_fallback_activity and col_act_alt and col_act_alt in work.columns:
-        act_alt = to_clean_str_series(work[col_act_alt])
-        use_alt = act_primary.str.strip().eq("")
-        act_primary = act_primary.mask(use_alt, act_alt)
-
-    work["_objetivo"] = objetivo_text
-    work["_actividad"] = act_primary
-    if group_col and group_col in work.columns:
-        work["_grupo"] = to_clean_str_series(work[group_col])
-        groups = ["_grupo"]
-    else:
-        groups = []
-
-    # Rellenos
-    if use_ffill_goal: work = forward_fill_col(work, "_objetivo", groups)
-    if use_bfill_goal: work = back_fill_col(work, "_objetivo", groups)
-    if use_ffill_act:  work = forward_fill_col(work, "_actividad", groups)
-    if use_bfill_act:  work = back_fill_col(work, "_actividad", groups)
-
-    # Marcar objetivos vacíos y ELIMINARLOS (requisito)
-    vacio_obj_mask = work["_objetivo"].apply(is_blank)
-    work.loc[vacio_obj_mask, "_objetivo"] = "Sin objetivo (vacío)"
+    # Limpiar y excluir objetivos vacíos
+    vacio_obj = work["_objetivo"].apply(is_blank)
+    work.loc[vacio_obj, "_objetivo"] = "Sin objetivo (vacío)"
     work = work[work["_objetivo"] != "Sin objetivo (vacío)"].copy()
 
-    # Consistencia
-    work["consistencia_%"] = work.apply(
-        lambda r: round(combined_score(r["_actividad"], r["_objetivo"]) * 100.0, 1),
-        axis=1
-    )
+    # Score
+    work["consistencia_%"] = work.apply(lambda r: round(combined_score(r["_actividad"], r["_objetivo"]) * 100.0, 1), axis=1)
 
-    return work.rename(columns={"_objetivo":"Objetivo específico","_actividad":"Actividad"})[
-        ["Objetivo específico","Actividad","consistencia_%"]
-    ]
+    out = work.rename(columns={"_objetivo":"Objetivo específico","_actividad":"Actividad"})
+    if top_obj_label:
+        out["Fuente (archivo)"] = top_obj_label
+    else:
+        out["Fuente (archivo)"] = ""
+    return out[["Objetivo específico","Actividad","consistencia_%","Fuente (archivo)"]]
 
-# -------- Informe Word --------
-def generar_informe_word(n_acts: int, promedio: float, dist: Dict[str,int]) -> bytes:
+# ===========================
+# Informe Word
+# ===========================
+def generar_informe_word(n_acts: int, promedio: float, dist: Dict[str,int], n_archivos: int) -> bytes:
     doc = Document()
     doc.add_heading("Conclusiones de Consistencia de actividades", 0)
 
@@ -179,6 +165,10 @@ def generar_informe_word(n_acts: int, promedio: float, dist: Dict[str,int]) -> b
     p = doc.add_paragraph()
     p.add_run("Porcentaje promedio de consistencia general: ").bold = True
     p.add_run(f"{promedio:.1f}%")
+
+    p = doc.add_paragraph()
+    p.add_run("Archivos procesados: ").bold = True
+    p.add_run(str(n_archivos))
 
     doc.add_heading("Interpretación de los resultados", level=1)
     if promedio >= 75:
@@ -222,87 +212,81 @@ def generar_informe_word(n_acts: int, promedio: float, dist: Dict[str,int]) -> b
     doc.save(buf); buf.seek(0)
     return buf.getvalue()
 
-# ---------------- UI ----------------
-st.set_page_config(page_title="Análisis de consistencia – Excel+Word (v7.1)", layout="wide")
-st.title("📊 Análisis de consistencia de actividades PEI – Excel + Word (v7.1)")
-st.caption("Objetivo específico limpio (solo '1.x …'), exclusión de 'Sin objetivo (vacío)', Excel con 4 columnas e informe Word.")
+# ===========================
+# UI
+# ===========================
+st.set_page_config(page_title="Análisis de consistencia – Multi-archivo (v8)", layout="wide")
+st.title("📊 Análisis de consistencia de actividades PEI – Multi-archivo (v8)")
+st.caption("Subí hasta 6 archivos (CSV/XLSX), uno por cada objetivo. El sistema consolida, limpia el objetivo (solo '1.x …') y calcula la consistencia por actividad. Excluye 'Sin objetivo (vacío)'.")
 
-uploaded = st.file_uploader("Sube el Excel del *Formulario Único para el PEI*", type=["xlsx","xls"])
+uploads = st.file_uploader(
+    "Sube las planillas (por ejemplo: 'Plan Estratégico ... Objetivo 1_Tabla.csv' ... 'Objetivo 6_Tabla.csv')",
+    type=["csv","xlsx","xls"],
+    accept_multiple_files=True
+)
 
-df = None
-if uploaded is not None:
-    try:
-        xls = pd.ExcelFile(uploaded)
-        sheet = xls.sheet_names[0] if len(xls.sheet_names)==1 else st.selectbox("Selecciona la hoja", xls.sheet_names, index=0)
-        df = pd.read_excel(xls, sheet_name=sheet)
-        st.caption(f"Hoja cargada: **{sheet}**")
-    except Exception:
-        df = pd.read_excel(uploaded)
+if uploads:
+    st.write(f"Archivos cargados: **{len(uploads)}**")
+    resultados = []
+    detalle_archivos = []
+    for f in uploads:
+        label = parse_top_objective_from_name(getattr(f, "name", ""))
+        frames = load_frames_from_upload(f)
+        used = 0
+        for df in frames:
+            out = evaluate_df(df, label)
+            if len(out):
+                resultados.append(out)
+                used += 1
+        detalle_archivos.append((getattr(f, "name", "archivo"), label or "", used))
 
-if df is not None:
-    st.subheader("Vista previa")
-    st.dataframe(df.head(20))
+    if not resultados:
+        st.warning("No se pudieron detectar columnas de Objetivo/Actividad en los archivos cargados.")
+    else:
+        final = pd.concat(resultados, ignore_index=True)
 
-    col_obj_text, col_obj_code, col_act, col_act_alt, col_group = guess_columns(df)
+        # Métricas
+        promedio = round(float(final["consistencia_%"].mean()), 1)
+        alta = int((final["consistencia_%"] >= 75).sum())
+        media = int(((final["consistencia_%"] >= 50) & (final["consistencia_%"] < 75)).sum())
+        baja  = int((final["consistencia_%"] < 50).sum())
 
-    with st.expander("Asignar columnas y opciones"):
-        cols = list(df.columns)
-        col_obj_text = st.selectbox("**Objetivo específico (texto)**", cols, index=cols.index(col_obj_text) if col_obj_text in cols else 0)
-        col_obj_code = st.selectbox("**Código de objetivo** (opcional, no se mezcla por defecto)", ["(ninguna)"] + cols, index=(0 if not col_obj_code or col_obj_code not in cols else cols.index(col_obj_code)+1))
-        col_act = st.selectbox("**Actividad (principal)**", cols, index=cols.index(col_act) if col_act in cols else 0)
-        col_act_alt = st.selectbox("**Actividad (alternativa/fallback)**", ["(ninguna)"] + cols, index=(0 if not col_act_alt or col_act_alt not in cols else cols.index(col_act_alt)+1))
-        col_group = st.selectbox("**Columna de agrupación (opcional)**", ["(ninguna)"] + cols, index=(0 if not col_group or col_group not in cols else cols.index(col_group)+1))
+        st.success(f"Se consolidaron **{len(final)}** actividades. Promedio global: **{promedio:.1f}%**.")
+        st.dataframe(final.head(100))
 
-        col_obj_code = None if col_obj_code == "(ninguna)" else col_obj_code
-        col_act_alt = None if col_act_alt == "(ninguna)" else col_act_alt
-        col_group = None if col_group == "(ninguna)" else col_group
-        combine_code_and_text = st.checkbox("Combinar **Código + Objetivo (texto)**", value=False)
-
-        use_ffill_goal = st.checkbox("Rellenar **Objetivo** hacia abajo (forward-fill)", value=False)
-        use_bfill_goal = st.checkbox("Rellenar **Objetivo** hacia arriba (backfill)", value=False)
-        use_ffill_act = st.checkbox("Rellenar **Actividad** hacia abajo (forward-fill)", value=False)
-        use_bfill_act = st.checkbox("Rellenar **Actividad** hacia arriba (backfill)", value=False)
-
-        group_cols = [col_group] if col_group else []
-
-    if st.button("Calcular y descargar Excel + Word"):
-        out = evaluate(
-            df, col_obj_text, col_obj_code, col_act, col_act_alt, col_group,
-            use_ffill_goal, use_bfill_goal, use_ffill_act, use_bfill_act,
-            use_fallback_activity=True, combine_code_and_text=combine_code_and_text
-        )
-
-        promedio_global = round(float(out["consistencia_%"].mean()), 1) if len(out) else 0.0
-        informe = pd.DataFrame({
-            "Objetivo específico": out["Objetivo específico"],
-            "Actividad específica cargada": out["Actividad"],
-            "Porcentaje de correlación o consistencia de cada actividad": out["consistencia_%"],
-            "Porcentaje de correlación total promedio": [promedio_global]*len(out)
+        # -------- Excel: dos hojas --------
+        # Hoja 1: Informe (4 columnas)
+        informe = final[["Objetivo específico","Actividad","consistencia_%"]].copy()
+        informe["Promedio global"] = promedio
+        informe = informe.rename(columns={
+            "consistencia_%": "Porcentaje de correlación o consistencia de cada actividad",
+            "Promedio global": "Porcentaje de correlación total promedio"
         })
+        # Hoja 2: Informe + Fuente (para rastreo)
+        informe_fuente = final[["Fuente (archivo)","Objetivo específico","Actividad","consistencia_%"]].copy()
+        informe_fuente = informe_fuente.rename(columns={"consistencia_%":"Porcentaje (actividad) %"})
 
-        st.success(f"¡Listo! {len(informe)} actividades evaluadas (promedio: {promedio_global:.1f}%).")
-        st.dataframe(informe.head(100))
-
-        # Excel
-        buf_excel = io.BytesIO()
-        with pd.ExcelWriter(buf_excel, engine="openpyxl") as writer:
-            informe.to_excel(writer, index=False, sheet_name="Informe")
-        st.download_button("⬇️ Descargar Informe Excel", data=buf_excel.getvalue(),
-                           file_name="informe_consistencia_pei.xlsx",
+        buf_xlsx = io.BytesIO()
+        with pd.ExcelWriter(buf_xlsx, engine="openpyxl") as w:
+            informe.to_excel(w, index=False, sheet_name="Informe")
+            informe_fuente.to_excel(w, index=False, sheet_name="Informe+Fuente")
+        st.download_button("⬇️ Descargar Excel (consolidado)", data=buf_xlsx.getvalue(),
+                           file_name="informe_consistencia_pei_consolidado.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        # Word
-        alta = int((out["consistencia_%"] >= 75).sum())
-        media = int(((out["consistencia_%"] >= 50) & (out["consistencia_%"] < 75)).sum())
-        baja = int((out["consistencia_%"] < 50).sum())
+        # -------- Word: conclusiones --------
         dist = {"Alta (>=75%)": alta, "Media (50–74%)": media, "Baja (<50%)": baja}
-
-        word_bytes = generar_informe_word(n_acts=len(out), promedio=promedio_global, dist=dist)
-        st.download_button("⬇️ Descargar Informe Word (Conclusiones)", data=word_bytes,
+        word_bytes = generar_informe_word(n_acts=len(final), promedio=promedio, dist=dist, n_archivos=len(uploads))
+        st.download_button("⬇️ Descargar Word (Conclusiones)", data=word_bytes,
                            file_name="conclusiones_consistencia_actividades.docx",
                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+        # -------- Tabla de archivos procesados --------
+        st.subheader("Archivos procesados")
+        st.table(pd.DataFrame(detalle_archivos, columns=["Archivo","Etiqueta detectada","Hojas utilizadas"]))
 else:
-    st.info("Sube el archivo Excel de respuestas para comenzar.")
+    st.info("Cargá entre 1 y 6 archivos (CSV/XLSX). Si el nombre contiene 'Objetivo 1..6', se usa como etiqueta de fuente.")
+
 
 
 
