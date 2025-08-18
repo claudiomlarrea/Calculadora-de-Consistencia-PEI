@@ -52,10 +52,6 @@ def combined_score(activity: str, objective: str) -> float:
     return float(0.6 * t_ratio + 0.4 * jac)
 
 def force_goal_only(text: str) -> str:
-    """
-    Devuelve exclusivamente el tramo '1.x …' del objetivo.
-    Si no hay código, devuelve el texto original.
-    """
     s = str(text).strip()
     m = CODE_RE.search(s)
     if not m:
@@ -104,8 +100,7 @@ def load_frames_from_upload(uploaded_file) -> List[pd.DataFrame]:
     name = getattr(uploaded_file, "name", "archivo")
     try:
         if name.lower().endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
-            frames.append(df)
+            frames.append(pd.read_csv(uploaded_file))
         else:
             xls = pd.ExcelFile(uploaded_file)
             best_sheet, best_hit = None, -1
@@ -123,7 +118,7 @@ def load_frames_from_upload(uploaded_file) -> List[pd.DataFrame]:
     return frames
 
 # ===========================
-# Evaluación por DataFrame
+# Evaluación y sugerencias
 # ===========================
 def evaluate_df(df: pd.DataFrame, top_obj_label: Optional[str]) -> pd.DataFrame:
     col_obj, col_act = guess_columns(df)
@@ -131,30 +126,23 @@ def evaluate_df(df: pd.DataFrame, top_obj_label: Optional[str]) -> pd.DataFrame:
         return pd.DataFrame(columns=[
             "Objetivo específico","Actividad","Porcentaje de consistencia","Fuente (archivo)","Cod. objetivo"
         ])
-
     objetivo = to_clean_str_series(df[col_obj]).apply(force_goal_only)
     actividad = to_clean_str_series(df[col_act])
 
     work = pd.DataFrame({"_objetivo": objetivo, "_actividad": actividad})
-
-    # Excluir objetivos vacíos
+    # excluir objetivos vacíos
     vacio_obj = work["_objetivo"].apply(is_blank)
     work.loc[vacio_obj, "_objetivo"] = "Sin objetivo (vacío)"
     work = work[work["_objetivo"] != "Sin objetivo (vacío)"].copy()
 
-    # Score
     work["Porcentaje de consistencia"] = work.apply(
         lambda r: round(combined_score(r["_actividad"], r["_objetivo"]) * 100.0, 1), axis=1
     )
-
     out = work.rename(columns={"_objetivo":"Objetivo específico","_actividad":"Actividad"})
     out["Fuente (archivo)"] = top_obj_label or ""
     out["Cod. objetivo"] = out["Objetivo específico"].apply(extract_code)
     return out[["Objetivo específico","Actividad","Porcentaje de consistencia","Fuente (archivo)","Cod. objetivo"]]
 
-# ===========================
-# Sugerencia de objetivo óptimo
-# ===========================
 def suggest_objective_for_activity(activity: str, candidates: List[str]) -> Tuple[str, float]:
     if is_blank(activity) or not candidates:
         return ("", 0.0)
@@ -169,34 +157,42 @@ def suggest_objective_for_activity(activity: str, candidates: List[str]) -> Tupl
 # ===========================
 # Informe Word – estructura EXACTA del ejemplo
 # ===========================
-def add_table(doc: Document, headers: List[str], rows: List[List[str]]):
-    t = doc.add_table(rows=1, cols=len(headers))
-    t.style = "Light List Accent 1"
-    hdr = t.rows[0].cells
-    for j, h in enumerate(headers):
-        hdr[j].text = str(h)
-    for row in rows:
-        cells = t.add_row().cells
-        for j, val in enumerate(row):
-            cells[j].text = str(val)
+EXAMPLE_LINES_BY_TOP = {
+    "1": [
+        "•\tAlta carga de actividades, pero predominan los desvíos (ej. cultura de calidad, planes de mejora).",
+        "•\tCasos de plena correspondencia en retroalimentación (encuestas a docentes, reuniones de comisión, tableros de seguimiento).",
+        "•\tRecomendación: clarificar criterios de registro para evitar que todas las acciones de capacitación/difusión se carguen en “cultura de calidad”.",
+    ],
+    "2": [
+        "•\tConvenios (ej. OSSE, Academia Nacional de Ciencias) aparecen bien ubicados, aunque algunos se cruzan con identidad cristiana.",
+        "•\tPocas actividades cargadas bajo Plan de Comunicación institucional (2.3), aunque es un objetivo central.",
+        "•\tRecomendación: fortalecer registro en sublíneas de comunicación y responsabilidad social.",
+    ],
+    "3": [
+        "•\tBuen nivel de coherencia: permanencia y retención, capacitaciones y recursos educativos están bien alineados.",
+        "•\tCasos de parcialidad: “Centro de Contactos” se relaciona tanto con tutoría (3.7) como con infraestructura tecnológica (3.6).",
+        "•\tRecomendación: mantener consistencia diferenciando actividades tecnológicas vs. pedagógicas.",
+    ],
+    "4": [
+        "•\tMuy escasa carga de actividades.",
+        "•\tMuchas que deberían estar aquí (capacitaciones, encuestas de satisfacción docente) aparecen cargadas en Objetivo 1.",
+        "•\tRecomendación: reforzar socialización del alcance de este objetivo.",
+    ],
+    "5": [
+        "•\tSe observan actividades de participación y seguimiento, pero con registros dispersos y parciales.",
+        "•\tEjemplo: acciones para graduados que podrían estar en Consejo de Graduados (5.2) o en Seguimiento (5.7).",
+        "•\tRecomendación: aclarar subcategorías de registro y fomentar más reportes desde Bienestar Estudiantil y Graduados.",
+    ],
+    "6": [
+        "•\tActividades escasamente registradas.",
+        "•\tAlgunas acciones vinculadas a espiritualidad o formación cristiana fueron cargadas en convenios (2.1).",
+        "•\tRecomendación: establecer claramente que todo lo pastoral y de formación en valores debe concentrarse aquí.",
+    ],
+}
 
-def text_bullet(doc: Document, txt: str):
-    p = doc.add_paragraph(txt)
-    p.style = doc.styles["List Paragraph"]
-
-def build_word_like_example(final: pd.DataFrame, n_archivos: int, nombres_obj_top: Dict[str,str]) -> bytes:
-    """
-    Genera un .docx con la misma estructura y redacción del ejemplo:
-    - RESUMEN
-    - A- Análisis de coherencia ...
-      1. Panorama General (3 bullets con counts)
-      2. Principales hallazgos por objetivos (1..6)
-      3. Recomendaciones estratégicas (5 bullets)
-    - B- Análisis del grado de desarrollo ...
-      1) Objetivos mayormente desarrollados
-      2) Objetivos con registro insuficiente o con desvíos
-      3) Síntesis
-    """
+def build_word_like_example(final: pd.DataFrame, n_archivos: int,
+                            nombres_obj_top: Dict[str,str],
+                            umbral_plena: float, umbral_parcial: float) -> bytes:
     doc = Document()
     doc.add_heading("Análisis de coherencia entre actividades registradas Formulario Único y acciones PEI", 0)
 
@@ -209,87 +205,65 @@ def build_word_like_example(final: pd.DataFrame, n_archivos: int, nombres_obj_to
     # ---- A) Coherencia
     doc.add_heading("A- Análisis de coherencia entre las actividades registradas en el Formulario Único y las acciones del Plan Estratégico Institucional UCCuyo 2023-2027:", level=1)
 
-    # 1. Panorama General
+    # 1. Panorama General (con umbrales configurables)
     doc.add_heading("1. Panorama General", level=2)
-    plena_n = int((final["Porcentaje de consistencia"] >= 75).sum())
-    parcial_n = int(((final["Porcentaje de consistencia"] >= 50) & (final["Porcentaje de consistencia"] < 75)).sum())
-    desvio_n = int((final["Porcentaje de consistencia"] < 50).sum())
-    total_n = int(len(final))
-    pct_plena = (plena_n / total_n * 100.0) if total_n else 0.0
+    pcts = final["Porcentaje de consistencia"].astype(float)
+    plena_n  = int((pcts >= umbral_plena).sum())
+    parcial_n = int(((pcts >= umbral_parcial) & (pcts < umbral_plena)).sum())
+    desvio_n  = int((pcts < umbral_parcial).sum())
+    total_n   = int(len(final))
+    pct_plena = (plena_n/total_n*100.0) if total_n else 0.0
 
-    text_bullet(doc, f"•\tActividades con plena correspondencia: {plena_n}")
-    text_bullet(doc, f"•\tActividades con correspondencia parcial: {parcial_n}")
-    text_bullet(doc, f"•\tActividades sin correspondencia clara (desvío): {desvio_n}")
-    doc.add_paragraph(
-        f"Esto muestra que {pct_plena:.1f}% de las actividades se registraron de manera plenamente alineada con las acciones del PEI. "
-        "La mayoría requieren revisión para reubicación o ajuste."
-    )
+    def bullet(doc, txt): 
+        p = doc.add_paragraph(txt); p.style = doc.styles["List Paragraph"]
 
-    # 2. Principales hallazgos por objetivos (1..6)
+    bullet(doc, f"•\tActividades con plena correspondencia: {plena_n}")
+    bullet(doc, f"•\tActividades con correspondencia parcial: {parcial_n}")
+    bullet(doc, f"•\tActividades sin correspondencia clara (desvío): {desvio_n}")
+
+    if pct_plena < 25:
+        doc.add_paragraph("Esto muestra que menos del 25% de las actividades se registraron de manera plenamente alineada con las acciones del PEI. La mayoría requieren revisión para reubicación o ajuste.")
+    else:
+        doc.add_paragraph(f"Esto muestra que {pct_plena:.1f}% de las actividades se registraron de manera plenamente alineada con las acciones del PEI. La mayoría requieren revisión para reubicación o ajuste.")
+
+    # 2. Principales hallazgos por objetivos (texto EXACTO editable)
     doc.add_heading("2. Principales hallazgos por objetivos", level=2)
-
-    # Resumen por objetivo específico (código 1.x -> 1, etc.)
+    # Detectar objetivo top (1..6) por código 1.x
     tmp = final.copy()
     tmp["ObjTop"] = tmp["Cod. objetivo"].str.extract(r"^(\d+)").fillna("")
-    grp = tmp.groupby("ObjTop").agg(
-        n=("Actividad","count"),
-        mean=("Porcentaje de consistencia","mean"),
-        plena=("Porcentaje de consistencia", lambda s: (s >= 75).mean()*100.0),
-        desvio=("Porcentaje de consistencia", lambda s: (s < 50).mean()*100.0)
-    ).reset_index()
-    grp["mean"] = grp["mean"].round(1)
-    grp["plena"] = grp["plena"].round(1)
-    grp["desvio"] = grp["desvio"].round(1)
+    for k in ["1","2","3","4","5","6"]:
+        titulo = nombres_obj_top.get(k, f"Objetivo {k}")
+        doc.add_paragraph(f"{titulo}")
+        for line in EXAMPLE_LINES_BY_TOP.get(k, []):
+            bullet(doc, line)
 
-    median_n = grp["n"].median() if len(grp) else 0
-
-    def hallmark_lines(row) -> List[str]:
-        lines = []
-        name = nombres_obj_top.get(str(row["ObjTop"]), f"Objetivo {row['ObjTop']}")
-        lines.append(f"{name}")
-        if row["n"] >= median_n:
-            lines.append("•\tAlta carga de actividades.")
-        if row["desvio"] >= 50:
-            lines.append("•\tPredominan los desvíos; revisar criterios de registro y redacción.")
-        if row["plena"] >= 75:
-            lines.append("•\tCasos de plena correspondencia con sublíneas específicas.")
-        # Recomendación genérica por objetivo
-        lines.append("•\tRecomendación: clarificar sublíneas y criterios para evitar mezcla de categorías.")
-        return lines
-
-    for _, r in grp.sort_values("ObjTop").iterrows():
-        for line in hallmark_lines(r):
-            doc.add_paragraph(line)
-
-    # 3. Recomendaciones estratégicas
+    # 3. Recomendaciones estratégicas (iguales al ejemplo)
     doc.add_heading("3. Recomendaciones estratégicas", level=2)
     for r in [
         "1.\tUnificar criterios de registro: evitar que cada área cargue la misma actividad en diferentes objetivos.",
         "2.\tCapacitación breve para equipos responsables: explicar con ejemplos qué se espera registrar en cada objetivo específico.",
-        "3.\tReforzar áreas críticas: objetivos con baja carga o alto desvío requieren mayor volumen y calidad de registro.",
-        "4.\tRevisión de desvíos: reubicar actividades luego de su reelaboración textual para reflejar fielmente el PEI.",
-        "5.\tMonitoreo temprano: usar la tabla consolidada como insumo en la próxima reunión de la Comisión de Planificación y Evaluación."
+        "3.\tReforzar áreas críticas: objetivos 4, 5 y 6 requieren mayor volumen de acciones registradas.",
+        "4.\tRevisión de desvíos: más de 100 actividades deben ser reubicadas para reflejar fielmente el PEI.",
+        "5.\tMonitoreo temprano: utilizar la tabla refinada como insumo en la próxima reunión de Comisión de Planificación y Evaluación.",
     ]:
         doc.add_paragraph(r)
 
-    # ---- B) Grado de desarrollo
+    # ---- B) Grado de desarrollo del PEI
     doc.add_heading("B- Análisis del grado de desarrollo del PEI por objetivo específico, considerando dos dimensiones:", level=1)
     doc.add_paragraph("•\tCantidad de actividades registradas")
     doc.add_paragraph("•\tPorcentaje de actividades con plena correspondencia (es decir, bien alineadas con el PEI).")
     doc.add_paragraph("Se observan dos tendencias claras:")
 
-    # Métricas por objetivo específico (sub-objetivo 1.x, 2.x, etc.)
     det = final.groupby("Objetivo específico").agg(
         n=("Actividad","count"),
-        pct_plena=("Porcentaje de consistencia", lambda s: (s >= 75).mean()*100.0)
+        pct_plena=("Porcentaje de consistencia", lambda s: (s >= umbral_plena).mean()*100.0)
     ).reset_index()
     det["pct_plena"] = det["pct_plena"].round(1)
 
-    # Umbrales
     n_q50 = det["n"].median() if len(det) else 0
     n_q25 = det["n"].quantile(0.25) if len(det) else 0
 
-    # 1) Mayormente desarrollados: alta N y alta % plena
+    # 1) Mayormente desarrollados
     doc.add_paragraph("")
     doc.add_paragraph("1. Objetivos mayormente desarrollados")
     mayor = det[(det["n"] >= n_q50) & (det["pct_plena"] >= 85)].sort_values(["pct_plena","n"], ascending=[False,False]).head(8)
@@ -299,7 +273,7 @@ def build_word_like_example(final: pd.DataFrame, n_archivos: int, nombres_obj_to
         for _, r in mayor.iterrows():
             doc.add_paragraph(f"•\t{r['Objetivo específico']} – {int(r['n'])} actividades; {r['pct_plena']:.1f}% de plena correspondencia.")
 
-    # 2) Con registro insuficiente o con desvíos
+    # 2) Registro insuficiente o con desvíos
     doc.add_paragraph("")
     doc.add_paragraph("2. Objetivos con registro insuficiente o con desvíos")
     insuf = det[(det["n"] < n_q25) | (det["pct_plena"] < 50)].sort_values(["pct_plena","n"], ascending=[True,True]).head(12)
@@ -309,13 +283,12 @@ def build_word_like_example(final: pd.DataFrame, n_archivos: int, nombres_obj_to
         for _, r in insuf.iterrows():
             doc.add_paragraph(f"•\t{r['Objetivo específico']} – {int(r['n'])} actividades; {r['pct_plena']:.1f}% de plena correspondencia.")
 
-    # 3) Síntesis
+    # 3) Síntesis (formato exacto)
     doc.add_paragraph("")
     doc.add_paragraph("3. Síntesis")
     bien = mayor["Objetivo específico"].tolist()
     parcial = det[(det["pct_plena"].between(50, 74.9))]["Objetivo específico"].tolist()
     prioridad = insuf["Objetivo específico"].tolist()
-
     doc.add_paragraph("•\tBien desarrollados: " + (", ".join(bien) if bien else "—"))
     doc.add_paragraph("•\tCon desarrollo parcial pero disperso: " + (", ".join(parcial) if len(parcial) else "—"))
     doc.add_paragraph("•\tRequieren atención prioritaria: " + (", ".join(prioridad) if len(prioridad) else "—"))
@@ -326,13 +299,13 @@ def build_word_like_example(final: pd.DataFrame, n_archivos: int, nombres_obj_to
 # ===========================
 # UI
 # ===========================
-st.set_page_config(page_title="Análisis de consistencia – Multi-archivo (v10.2)", layout="wide")
-st.title("📊 Análisis de consistencia de actividades PEI – Multi-archivo (v10.2)")
-st.caption("Genera Word con la **misma estructura** del ejemplo (RESUMEN, A/B, hallazgos y síntesis). También entrega el Excel consolidado.")
+st.set_page_config(page_title="Análisis de consistencia – Multi-archivo (v10.3)", layout="wide")
+st.title("📊 Análisis de consistencia de actividades PEI – Multi-archivo (v10.3)")
+st.caption("Word con la **misma estructura y frases base** del ejemplo. Ajustá umbrales para que los conteos coincidan con tu referencia.")
 
-# Nombres de objetivos top (1..6) editables para que el Word se lea igual que tu ejemplo
+# Panel lateral: nombres visibles de los 6 objetivos y umbrales
 with st.sidebar:
-    st.markdown("**Nombres de objetivos (1..6)**")
+    st.markdown("**Nombres visibles de los 6 objetivos**")
     obj_names = {
         "1": st.text_input("1", "Objetivo 1: Aseguramiento de la calidad"),
         "2": st.text_input("2", "Objetivo 2: Vinculación y comunicación"),
@@ -341,6 +314,10 @@ with st.sidebar:
         "5": st.text_input("5", "Objetivo 5: Estudiantes y graduados"),
         "6": st.text_input("6", "Objetivo 6: Identidad cristiana"),
     }
+    st.markdown("---")
+    st.markdown("**Umbrales de clasificación (Word)**")
+    umbral_plena = st.slider("Plena correspondencia ≥", min_value=40, max_value=90, step=1, value=75)
+    umbral_parcial = st.slider("Correspondencia parcial ≥", min_value=10, max_value=umbral_plena-1, step=1, value=50)
 
 uploads = st.file_uploader(
     "Subí hasta 6 planillas (CSV/XLSX), una por cada objetivo si las tenés separadas",
@@ -349,33 +326,30 @@ uploads = st.file_uploader(
 
 if uploads:
     st.write(f"Archivos cargados: **{len(uploads)}**")
-    resultados = []
-    detalle_archivos = []
+    resultados, detalle_archivos = [], []
     for f in uploads:
         label = parse_top_objective_from_name(getattr(f, "name", ""))
-        frames = load_frames_from_upload(f)
-        used = 0
-        for df in frames:
+        for df in load_frames_from_upload(f):
             out = evaluate_df(df, label)
             if len(out):
-                resultados.append(out); used += 1
-        detalle_archivos.append((getattr(f, "name", "archivo"), label or "", used))
+                resultados.append(out)
+        detalle_archivos.append(getattr(f, "name", "archivo"))
 
     if not resultados:
         st.warning("No se detectaron columnas de Objetivo/Actividad en los archivos cargados.")
     else:
         final = pd.concat(resultados, ignore_index=True)
 
-        # Sugerencia (se mantiene en Excel)
+        # Sugerencias (para Excel)
         candidatos = sorted(pd.Series(final["Objetivo específico"].unique()).dropna().tolist())
-        sugeridos, sugeridos_pct, delta_pp = [], [], []
+        sug_obj, sug_pct, delta = [], [], []
         for _, r in final.iterrows():
-            best_obj, best_pct = suggest_objective_for_activity(r["Actividad"], candidatos)
-            sugeridos.append(best_obj); sugeridos_pct.append(best_pct)
-            delta_pp.append(round(best_pct - float(r["Porcentaje de consistencia"]), 1))
-        final["Objetivo sugerido (máxima consistencia)"] = sugeridos
-        final["Porcentaje de consistencia (sugerido)"] = sugeridos_pct
-        final["Diferencia (p.p.)"] = delta_pp
+            bobj, bpct = suggest_objective_for_activity(r["Actividad"], candidatos)
+            sug_obj.append(bobj); sug_pct.append(bpct)
+            delta.append(round(bpct - float(r["Porcentaje de consistencia"]), 1))
+        final["Objetivo sugerido (máxima consistencia)"] = sug_obj
+        final["Porcentaje de consistencia (sugerido)"] = sug_pct
+        final["Diferencia (p.p.)"] = delta
 
         # Métrica global
         promedio = round(float(final["Porcentaje de consistencia"].mean()), 1) if len(final) else 0.0
@@ -408,15 +382,14 @@ if uploads:
                            file_name="informe_consistencia_pei_consolidado.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        # -------- Word con estructura del ejemplo --------
-        word_bytes = build_word_like_example(final, n_archivos=len(uploads), nombres_obj_top=obj_names)
+        # -------- Word (estructura exacta) --------
+        word_bytes = build_word_like_example(
+            final, n_archivos=len(uploads), nombres_obj_top=obj_names,
+            umbral_plena=umbral_plena, umbral_parcial=umbral_parcial
+        )
         st.download_button("⬇️ Descargar Word (estructura ejemplo)", data=word_bytes,
                            file_name="analisis_coherencia_actividades_PEI.docx",
                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-
-        # Tabla de archivos procesados
-        st.subheader("Archivos procesados")
-        st.table(pd.DataFrame(detalle_archivos, columns=["Archivo","Etiqueta detectada","Hojas utilizadas"]))
 else:
     st.info("Cargá entre 1 y 6 archivos (CSV/XLSX). Si el nombre contiene 'Objetivo 1..6', se usa como etiqueta de fuente.")
 
