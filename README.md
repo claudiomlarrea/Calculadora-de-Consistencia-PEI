@@ -1,20 +1,21 @@
-# Análisis de consistencia de actividades PEI – Multi-archivo (v10)
+# Análisis de consistencia de actividades PEI – Multi-archivo (v10.2)
 
-Acepta hasta 6 planillas (CSV/XLSX), consolida y **limpia el objetivo** (solo `1.x …`), **excluye** “Sin objetivo (vacío)”, calcula:
-
-- **Porcentaje de consistencia** por actividad.
-- **Objetivo sugerido (máxima consistencia)** por actividad, con % sugerido y **delta (p.p.)**.
+La app acepta hasta 6 planillas (CSV/XLSX), limpia el objetivo (solo `1.x …`), excluye “Sin objetivo (vacío)”, calcula la **consistencia** por actividad y sugiere el **Objetivo de máxima consistencia**.  
 
 ## Salidas
-**Excel**
-- `Informe`: Objetivo específico, Actividad, Porcentaje de consistencia, Objetivo sugerido (máxima consistencia),
-  Porcentaje de consistencia (sugerido), Diferencia (p.p.), y **Promedio global**.
-- `Informe+Fuente`: lo mismo + **Fuente (archivo)** para trazabilidad.
+- **Excel consolidado** (`Informe` e `Informe+Fuente`).
+- **Word con la estructura EXACTA del ejemplo**:
+  - **RESUMEN**
+  - **A- Análisis de coherencia**  
+    1. Panorama General (plena/parcial/desvío)  
+    2. Principales hallazgos por objetivos (1..6)  
+    3. Recomendaciones estratégicas  
+  - **B- Grado de desarrollo del PEI por objetivo específico**  
+    1) Objetivos mayormente desarrollados  
+    2) Objetivos con registro insuficiente o con desvíos  
+    3) Síntesis
 
-**Word (formato plantilla PEI)**
-- **RESUMEN** y alcance del análisis.
-- **A- Análisis de coherencia**: panorama general (plena/parcial/desvío), tabla de **hallazgos por objetivo** y **recomendaciones estratégicas**.
-- **B- Grado de desarrollo del PEI por objetivo específico**: tablas de objetivos **mayormente desarrollados** y **con registro insuficiente o con desvíos**, y una **síntesis** final.
+> En la barra lateral podés **editar los nombres** de los 6 objetivos (ej.: “Aseguramiento de la calidad”) para que el informe Word se lea exactamente como el documento de referencia.
 
 ## Uso
 ```bash
