@@ -1,6 +1,6 @@
-# Análisis de consistencia de actividades PEI – Multi-archivo (v9)
+# Análisis de consistencia de actividades PEI – Multi-archivo (v10)
 
-Acepta hasta 6 planillas (CSV/XLSX), consolida y limpia el objetivo (solo `1.x …`), excluye “Sin objetivo (vacío)”, calcula:
+Acepta hasta 6 planillas (CSV/XLSX), consolida y **limpia el objetivo** (solo `1.x …`), **excluye** “Sin objetivo (vacío)”, calcula:
 
 - **Porcentaje de consistencia** por actividad.
 - **Objetivo sugerido (máxima consistencia)** por actividad, con % sugerido y **delta (p.p.)**.
@@ -8,20 +8,16 @@ Acepta hasta 6 planillas (CSV/XLSX), consolida y limpia el objetivo (solo `1.x �
 ## Salidas
 **Excel**
 - `Informe`: Objetivo específico, Actividad, Porcentaje de consistencia, Objetivo sugerido (máxima consistencia),
-  Porcentaje de consistencia (sugerido), Diferencia (p.p.), y el **Promedio global**.
-- `Informe+Fuente`: lo mismo + columna **Fuente (archivo)** para trazabilidad.
+  Porcentaje de consistencia (sugerido), Diferencia (p.p.), y **Promedio global**.
+- `Informe+Fuente`: lo mismo + **Fuente (archivo)** para trazabilidad.
 
-**Word avanzado**
-- Resumen ejecutivo (total, promedio, mediana, P25/P75, min/máx).
-- Distribución por niveles (Alta/Media/Baja).
-- **Ranking por Objetivo específico** (n, promedio, mediana, % en Bajo) – top 10 críticos.
-- Objetivos con **mayor dispersión** (std, IQR).
-- **Actividades con alto potencial** (baja consistencia y gran mejora sugerida).
-- Duplicadas/similares (detección simple).
-- Guía de reescritura y **plan de mejora** (corto/mediano plazo y revisión periódica).
-- Anexo metodológico (cómo se calcula la consistencia).
+**Word (formato plantilla PEI)**
+- **RESUMEN** y alcance del análisis.
+- **A- Análisis de coherencia**: panorama general (plena/parcial/desvío), tabla de **hallazgos por objetivo** y **recomendaciones estratégicas**.
+- **B- Grado de desarrollo del PEI por objetivo específico**: tablas de objetivos **mayormente desarrollados** y **con registro insuficiente o con desvíos**, y una **síntesis** final.
 
 ## Uso
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
+
