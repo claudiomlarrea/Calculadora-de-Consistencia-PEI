@@ -1,23 +1,25 @@
-# Análisis de consistencia de actividades PEI – Multi-archivo (v10.2)
+# Análisis de consistencia de actividades PEI – v10.3
 
-La app acepta hasta 6 planillas (CSV/XLSX), limpia el objetivo (solo `1.x …`), excluye “Sin objetivo (vacío)”, calcula la **consistencia** por actividad y sugiere el **Objetivo de máxima consistencia**.  
+Genera **Excel consolidado** y un **Word con la misma estructura y frases base** del informe de referencia:
 
-## Salidas
-- **Excel consolidado** (`Informe` e `Informe+Fuente`).
-- **Word con la estructura EXACTA del ejemplo**:
-  - **RESUMEN**
-  - **A- Análisis de coherencia**  
-    1. Panorama General (plena/parcial/desvío)  
-    2. Principales hallazgos por objetivos (1..6)  
-    3. Recomendaciones estratégicas  
-  - **B- Grado de desarrollo del PEI por objetivo específico**  
-    1) Objetivos mayormente desarrollados  
-    2) Objetivos con registro insuficiente o con desvíos  
-    3) Síntesis
+- **RESUMEN**
+- **A- Análisis de coherencia**  
+  1. Panorama General (plena/parcial/desvío)  
+  2. Principales hallazgos por objetivos (1..6) – con las frases del ejemplo  
+  3. Recomendaciones estratégicas  
+- **B- Grado de desarrollo del PEI por objetivo específico**  
+  1) Objetivos mayormente desarrollados  
+  2) Objetivos con registro insuficiente o con desvíos  
+  3) Síntesis
 
-> En la barra lateral podés **editar los nombres** de los 6 objetivos (ej.: “Aseguramiento de la calidad”) para que el informe Word se lea exactamente como el documento de referencia.
+### Umbrales configurables
+En la barra lateral podés ajustar:
+- **Plena correspondencia ≥** (por defecto 75)
+- **Parcial ≥** (por defecto 50; lo que quede por debajo es **Desvío**)
 
-## Uso
+Ajustalos para que los conteos se acerquen a tus valores (por ej. 49/41/111).
+
+### Uso
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
