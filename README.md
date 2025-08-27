@@ -1,45 +1,28 @@
+# 📊 Calculadora de Consistencia PEI
 
-# Calculadora de Consistencia PEI – UCCuyo 2023–2027
+Calculadora interactiva para analizar la coherencia entre las acciones cargadas en los formularios institucionales y los objetivos estratégicos del PEI de UCCuyo.
 
-Esta calculadora permite analizar la coherencia entre las actividades institucionales registradas en el Plan Estratégico Institucional (PEI) de la UCCuyo y sus objetivos específicos para el período 2023–2027.
+## Cómo usar
 
-## 🚀 ¿Qué hace esta calculadora?
-- Acepta directamente los **6 archivos CSV** de los objetivos del PEI.
-- Calcula automáticamente:
-  - Total de actividades por archivo.
-  - Actividades con **consistencia plena**, **parcial** o **nula**.
-- Genera dos archivos descargables:
-  - 📊 Un Excel con tabla resumen.
-  - 📄 Un documento Word narrado con el análisis.
+1. Subí los 6 archivos `.csv` correspondientes a los objetivos.
+2. La app analizará cada acción y clasificará su consistencia como:
+   - Plena
+   - Parcial
+   - Baja
+3. Podés descargar:
+   - Un archivo Excel con los resultados
+   - Un informe Word con una narración del análisis
 
-## 📁 Archivos requeridos
-Subir **6 archivos .CSV**, uno por cada objetivo específico del PEI.
+## Requisitos
 
-## 🧑‍💻 Cómo ejecutar localmente
+- Streamlit
+- Pandas
+- Openpyxl
+- Python-docx
 
-1. Clonar este repositorio o descargar los archivos.
-2. Crear un entorno virtual (opcional pero recomendado):
-
-```bash
-python -m venv venv
-source venv/bin/activate  # En Windows: venv\Scripts\activate
-```
-
-3. Instalar dependencias:
+## Ejecución local
 
 ```bash
 pip install -r requirements.txt
-```
-
-4. Ejecutar la aplicación:
-
-```bash
 streamlit run app.py
-```
 
-## 📦 Despliegue en Streamlit Cloud
-Podés subir los 3 archivos (`app.py`, `requirements.txt`, `README.md`) a un repositorio de GitHub y desplegarlo en [streamlit.io](https://streamlit.io/). No se necesita archivo adicional de referencia.
-
----
-
-Desarrollado para la Secretaría de Investigación – UCCuyo.
