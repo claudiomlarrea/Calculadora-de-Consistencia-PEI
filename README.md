@@ -1,26 +1,29 @@
-# Análisis de consistencia de actividades PEI – v10.3
 
-Genera **Excel consolidado** y un **Word con la misma estructura y frases base** del informe de referencia:
+# Calculadora de Consistencia PEI – UCCuyo 2023–2027
 
-- **RESUMEN**
-- **A- Análisis de coherencia**  
-  1. Panorama General (plena/parcial/desvío)  
-  2. Principales hallazgos por objetivos (1..6) – con las frases del ejemplo  
-  3. Recomendaciones estratégicas  
-- **B- Grado de desarrollo del PEI por objetivo específico**  
-  1) Objetivos mayormente desarrollados  
-  2) Objetivos con registro insuficiente o con desvíos  
-  3) Síntesis
+Esta aplicación en Streamlit permite evaluar la consistencia de las actividades institucionales registradas en el Formulario Único con respecto al Plan Estratégico Institucional (PEI) de la Universidad Católica de Cuyo (2023–2027).
 
-### Umbrales configurables
-En la barra lateral podés ajustar:
-- **Plena correspondencia ≥** (por defecto 75)
-- **Parcial ≥** (por defecto 50; lo que quede por debajo es **Desvío**)
+## Características
 
-Ajustalos para que los conteos se acerquen a tus valores (por ej. 49/41/111).
+- Verificación automática por objetivos generales y específicos del PEI.
+- Validación basada en coincidencia de palabras clave y metadatos.
+- Detección de desvíos y actividades sin correspondencia.
+- Análisis por unidad académica, tipo de actividad y nivel de alineación.
+- Reportes descargables en Excel y Word.
 
-### Uso
+## Archivos principales
+
+- `app.py`: aplicación principal de Streamlit.
+- `pei_referencia.csv`: base de referencia con objetivos, acciones e indicadores del PEI.
+- `requirements.txt`: dependencias necesarias para ejecutar la app.
+
+## Cómo ejecutar
+
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
+```
 
+## Autor
+
+Claudio M. Larrea Arnau
