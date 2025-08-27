@@ -1,21 +1,45 @@
 
 # Calculadora de Consistencia PEI – UCCuyo 2023–2027
 
-Esta aplicación en Streamlit permite subir los 6 archivos individuales correspondientes a los Objetivos del PEI (uno por archivo) y analiza la coherencia entre las actividades institucionales y los objetivos específicos.
+Esta calculadora permite analizar la coherencia entre las actividades institucionales registradas en el Plan Estratégico Institucional (PEI) de la UCCuyo y sus objetivos específicos para el período 2023–2027.
 
-## Funcionalidades
+## 🚀 ¿Qué hace esta calculadora?
+- Acepta directamente los **6 archivos CSV** de los objetivos del PEI.
+- Calcula automáticamente:
+  - Total de actividades por archivo.
+  - Actividades con **consistencia plena**, **parcial** o **nula**.
+- Genera dos archivos descargables:
+  - 📊 Un Excel con tabla resumen.
+  - 📄 Un documento Word narrado con el análisis.
 
-- Unificación automática de los 6 archivos.
-- Análisis de consistencia textual (plena, parcial, nula).
-- Generación de reporte en Excel.
-- Informe narrado en Word.
+## 📁 Archivos requeridos
+Subir **6 archivos .CSV**, uno por cada objetivo específico del PEI.
 
-## Archivos requeridos
+## 🧑‍💻 Cómo ejecutar localmente
 
-- `Plan Estratégico Institucional UCCuyo_Objetivo 1_Tabla.csv`
-- `...Objetivo 2_Tabla.csv`
-- `...Objetivo 3_Tabla.csv`
-- `...Objetivo 4_Tabla.csv`
-- `...Objetivo 5_Tabla.csv`
-- `...Objetivo 6_Tabla.csv`
+1. Clonar este repositorio o descargar los archivos.
+2. Crear un entorno virtual (opcional pero recomendado):
 
+```bash
+python -m venv venv
+source venv/bin/activate  # En Windows: venv\Scripts\activate
+```
+
+3. Instalar dependencias:
+
+```bash
+pip install -r requirements.txt
+```
+
+4. Ejecutar la aplicación:
+
+```bash
+streamlit run app.py
+```
+
+## 📦 Despliegue en Streamlit Cloud
+Podés subir los 3 archivos (`app.py`, `requirements.txt`, `README.md`) a un repositorio de GitHub y desplegarlo en [streamlit.io](https://streamlit.io/). No se necesita archivo adicional de referencia.
+
+---
+
+Desarrollado para la Secretaría de Investigación – UCCuyo.
