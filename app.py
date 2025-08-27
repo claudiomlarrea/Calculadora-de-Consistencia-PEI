@@ -1,31 +1,49 @@
-
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Calculadora de Consistencia PEI", layout="wide")
-st.title("🧮 Calculadora de Consistencia entre Actividades y Objetivos del PEI")
+st.set_page_config(page_title="Calculadora de consistencia PEI", layout="wide")
 
-st.markdown("### 1. Subí el archivo con las actividades")
-uploaded_file = st.file_uploader("Archivo Excel con actividades (formato .xlsx)", type=["xlsx"])
+st.title("Calculadora de Consistencia – Plan Estratégico Institucional UCCuyo 2023–2027")
+st.markdown("Subí los archivos CSV con las actividades de uno o más objetivos específicos para ver su consistencia.")
 
-if uploaded_file:
-    actividades = pd.read_excel(uploaded_file)
-    st.success("✅ Archivo cargado correctamente")
-    st.write("Vista previa de las actividades:", actividades.head())
+uploaded_files = st.file_uploader(
+    "Elegí los archivos CSV con las actividades (podés seleccionar varios)",
+    type="csv",
+    accept_multiple_files=True
+)
 
-    st.markdown("### 2. Objetivos institucionales de referencia")
-    try:
-        referencia = pd.read_csv("pei_referencia.csv")
-        st.write(referencia)
-    except Exception as e:
-        st.error(f"Error al leer pei_referencia.csv: {e}")
+if uploaded_files:
+    dfs = []
+    for uploaded_file in uploaded_files:
+        try:
+            df = pd.read_csv(uploaded_file)
+            dfs.append(df)
+            st.success(f"Archivo '{uploaded_file.name}' cargado correctamente.")
+            st.dataframe(df.head())
+        except Exception as e:
+            st.error(f"Error al cargar '{uploaded_file.name}': {e}")
 
-    st.markdown("### 3. Procesamiento de consistencia")
-    if "Objetivo PEI" in actividades.columns and "Descripción Actividad" in actividades.columns:
-        actividades["Consistente"] = actividades["Objetivo PEI"].isin(referencia["Objetivo"])
-        resumen = actividades["Consistente"].value_counts().rename(index={True: "Consistentes", False: "Inconsistentes"})
-        st.dataframe(actividades)
-        st.markdown("#### Resumen")
-        st.write(resumen)
-    else:
-        st.warning("⚠️ Las columnas necesarias no están presentes en el archivo cargado.")
+    if dfs:
+        df_actividades = pd.concat(dfs, ignore_index=True)
+
+        columnas_requeridas = [
+            'AÑO',
+            'Objetivos específicos 1',
+            'Acciones',
+            'Responsable',
+            'Unidad académica',
+            'Indicadores'
+        ]
+
+        columnas_faltantes = [col for col in columnas_requeridas if col not in df_actividades.columns]
+
+        if columnas_faltantes:
+            st.error(f"Faltan las siguientes columnas requeridas: {', '.join(columnas_faltantes)}")
+        else:
+            st.success("Todos los encabezados requeridos están presentes.")
+            st.subheader("Vista previa combinada de actividades")
+            st.dataframe(df_actividades)
+
+            resumen = df_actividades.groupby(['Unidad académica', 'Objetivos específicos 1']).size().reset_index(name='Cantidad de actividades')
+            st.subheader("Resumen de actividades por unidad académica y objetivo específico")
+            st.dataframe(resumen)
