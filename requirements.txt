@@ -1,3 +1,4 @@
-pandas
 streamlit
+pandas
+python-docx
 openpyxl
