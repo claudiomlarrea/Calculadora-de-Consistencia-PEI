@@ -4,46 +4,40 @@ import pandas as pd
 
 st.set_page_config(page_title="Calculadora de Consistencia PEI", layout="wide")
 
-st.title("Calculadora de Consistencia de Actividades vs PEI")
-st.markdown("Esta herramienta permite evaluar si las actividades institucionales están alineadas con el Plan Estratégico Institucional (PEI) UCCuyo 2023–2027.")
+st.title("Calculadora de Consistencia con el PEI")
+st.markdown("Subí un archivo con tus actividades institucionales y comparalo con los objetivos, acciones e indicadores del PEI.")
 
-uploaded_file = st.file_uploader("Cargar archivo de actividades (Excel)", type=["xlsx"])
-pei_file = "pei_referencia.csv"
+uploaded_file = st.file_uploader("Subí tu archivo de actividades", type=["csv", "xlsx"])
 
-if uploaded_file:
-    actividades_df = pd.read_excel(uploaded_file)
-    pei_df = pd.read_csv(pei_file)
-
-    # Normalizar texto
-    actividades_df.fillna("", inplace=True)
-    pei_df.fillna("", inplace=True)
-
-    resultados = []
-    for _, act in actividades_df.iterrows():
-        descripcion = act["Descripción de la Actividad"].lower()
-        correspondencias = pei_df[pei_df["Acción"].str.lower().str.contains(descripcion, na=False)]
-        if not correspondencias.empty:
-            nivel = "Plena correspondencia"
-            ref = correspondencias.iloc[0]
+if uploaded_file is not None:
+    try:
+        if uploaded_file.name.endswith(".csv"):
+            df_actividades = pd.read_csv(uploaded_file)
         else:
-            nivel = "Desvío o correspondencia parcial"
-            ref = pd.Series()
-        resultados.append({
-            "Actividad": act["Descripción de la Actividad"],
-            "Unidad": act.get("Unidad", "No especificada"),
-            "Nivel de Correspondencia": nivel,
-            "Objetivo General": ref.get("Objetivo General", ""),
-            "Objetivo Específico": ref.get("Objetivo Específico", ""),
-            "Acción PEI": ref.get("Acción", "")
-        })
+            df_actividades = pd.read_excel(uploaded_file)
+    except Exception as e:
+        st.error(f"Error al leer el archivo: {e}")
+    else:
+        st.success("Archivo cargado correctamente. Mostrando vista previa:")
+        st.dataframe(df_actividades.head())
 
-    st.subheader("Resultados de Evaluación")
-    resultados_df = pd.DataFrame(resultados)
-    st.dataframe(resultados_df)
+        # Cargar la base de referencia
+        df_referencia = pd.read_csv("pei_referencia.csv")
 
-    output_excel = "evaluacion_consistencia.xlsx"
-    resultados_df.to_excel(output_excel, index=False)
-    with open(output_excel, "rb") as f:
-        st.download_button("Descargar resultados en Excel", f, file_name=output_excel)
-else:
-    st.info("Por favor, subí un archivo de actividades para comenzar. El archivo debe tener una columna llamada 'Descripción de la Actividad'.")
+        # Normalización de columnas
+        for col in ["Objetivo", "Acción", "Indicador"]:
+            df_actividades[col] = df_actividades[col].astype(str).str.strip().str.lower()
+            df_referencia[col] = df_referencia[col].astype(str).str.strip().str.lower()
+
+        # Comparación
+        df_resultado = df_actividades.copy()
+        df_resultado["Coincide Objetivo"] = df_resultado["Objetivo"].isin(df_referencia["Objetivo"])
+        df_resultado["Coincide Acción"] = df_resultado["Acción"].isin(df_referencia["Acción"])
+        df_resultado["Coincide Indicador"] = df_resultado["Indicador"].isin(df_referencia["Indicador"])
+
+        st.markdown("### Resultados del análisis")
+        st.dataframe(df_resultado)
+
+        # Descargar resultado
+        csv = df_resultado.to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Descargar resultados en CSV", data=csv, file_name="resultado_consistencia.csv", mime="text/csv")
