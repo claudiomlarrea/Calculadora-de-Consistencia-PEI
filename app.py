@@ -6,7 +6,7 @@ import streamlit as st
 
 from utils import (
     normalize_colnames, clean_rows, detect_columns, count_valid_pairs,
-    analyze_independent, excel_consolidado
+    analyze_independent, excel_consolidado, docx_conclusiones
 )
 
 st.set_page_config(page_title="Calculadora – Formulario Único", layout="wide")
@@ -53,7 +53,7 @@ with c2:
 
 if st.button("🔎 Realizar Análisis Completo de Consistencia"):
     with st.spinner("Calculando consistencias y generando informes…"):
-        resumen, detalle, perf_obj, mejoras, dup = analyze_independent(
+        resumen, detalle, cons_obj, mejoras, dup = analyze_independent(
             df, uploaded.name, col_obj, col_act, thr_full=float(t_plena), thr_partial=float(t_parcial)
         )
 
@@ -61,11 +61,22 @@ if st.button("🔎 Realizar Análisis Completo de Consistencia"):
     st.write(resumen)
 
     ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    excel_bytes = excel_consolidado(resumen, detalle, perf_obj, mejoras, dup)
+    excel_bytes = excel_consolidado(resumen, detalle, cons_obj, mejoras, dup)
+    word_bytes  = docx_conclusiones(resumen, detalle, cons_obj, mejoras)
 
-    st.download_button("⬇️ Descargar EXCEL — informe_consistencia_pei_consolidado",
-                       data=excel_bytes,
-                       file_name=f"informe_consistencia_pei_consolidado_{ts}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button("⬇️ Descargar EXCEL — informe_consistencia_pei_consolidado",
+                           data=excel_bytes,
+                           file_name=f"informe_consistencia_pei_consolidado_{ts}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    with c2:
+        if word_bytes:
+            st.download_button("⬇️ Descargar WORD — Diagnóstico Completo del Formulario",
+                               data=word_bytes,
+                               file_name=f'Diagnostico_Completo_del_Formulario_{ts}.docx',
+                               mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        else:
+            st.info("No se pudo generar el Word (falta python-docx). El Excel está disponible.")
 else:
     st.warning("Cargá el archivo y tocá el botón para generar los informes.")
