@@ -1,3 +1,4 @@
+
 from io import BytesIO
 from pathlib import Path
 import re
@@ -33,25 +34,23 @@ def normalize_colnames(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def clean_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Quita filas completamente vacías o con solo espacios/NaN."""
     if df is None or df.empty:
         return df
     tmp = df.dropna(how="all", axis=1)
     def row_empty(r):
         for v in r:
             s = str(v).strip().lower()
-            if s not in ("", "nan", "none"):
+            if s not in ("", "nan", "none", "-"):
                 return False
         return True
     mask = tmp.apply(row_empty, axis=1)
     return tmp.loc[~mask].reset_index(drop=True)
 
 # =============================
-# Parseo de PEI (PDF)
+# Parseo de PEI (PDF) — modo A
 # =============================
 
 def parse_pei_pdf(file_like) -> Dict[str, Any]:
-    """Devuelve estructura con objetivos -> específicos -> acciones/indicadores."""
     reader = PdfReader(file_like)
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
     text_norm = strip_accents(text)
@@ -59,10 +58,10 @@ def parse_pei_pdf(file_like) -> Dict[str, Any]:
     obj_map: Dict[str, Dict[str, Any]] = {}
     current_obj = None
     current_spec = None
-    mode = None  # "acciones" | "indicadores" | None
+    mode = None
 
     re_obj = re.compile(r"^OBJETIVO\s+(\d)\s*[:\-]?", re.IGNORECASE)
-    re_spec = re.compile(r"^(\d\.\d)\.?")  # 1.1, 2.3, ...
+    re_spec = re.compile(r"^(\d\.\d)\.?")
     for raw in lines:
         l = raw
         m = re_obj.search(l)
@@ -95,7 +94,6 @@ def parse_pei_pdf(file_like) -> Dict[str, Any]:
     return obj_map
 
 def build_plan_index(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Lista buscable (objetivo, específico, texto acciones/indicadores)."""
     index = []
     for obj, objdata in plan.items():
         especs = objdata.get("especificos", {})
@@ -122,26 +120,6 @@ def build_plan_index(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
                     })
     return [e for e in index if e.get("texto")]
 
-# =============================
-# Matching actividad ↔ PEI
-# =============================
-
-def build_activity_text(row: pd.Series) -> str:
-    candidates = [
-        "actividad", "accion", "acciones", "descripcion", "descripción",
-        "detalle", "indicador", "indicadores", "resultado", "resultados",
-        "objetivo", "objetivos", "titulo", "titulo actividad", "nombre"
-    ]
-    cols = [c for c in row.index if c in candidates]
-    if not cols:
-        cols = list(row.index)
-    parts = []
-    for c in cols:
-        v = str(row[c])
-        if v and v.lower() not in ("nan","none"):
-            parts.append(v)
-    return " ".join(parts)
-
 def match_activity_to_plan(activity_text: str, index: List[Dict[str, Any]], objective_hint: str=None):
     q = normalize_text(activity_text)
     best = None
@@ -163,43 +141,26 @@ def classify_consistency(score: float, ok_objective: bool, thresholds: Dict[str,
         return "parcial"
     return "nula"
 
-# =============================
-# Resúmenes y reportes
-# =============================
-
 def compute_consistency_with_plan(dfs: List[pd.DataFrame], names: List[str], plan_index: List[Dict[str,Any]], thresholds: Dict[str,float]):
-    detail_tables = []
-    summary_rows = []
-    matrix_rows = []
-
+    detail_tables, summary_rows, matrix_rows = [], [], []
     for name, df in zip(names, dfs):
         df = clean_rows(df.copy())
-        if not len(df):
+        if not len(df): 
             continue
         m = re.match(r"^\s*([1-6])", strip_accents(name))
         objective_hint = m.group(1) if m else None
 
-        best_objs = []
-        best_specs = []
-        best_scores = []
-        best_acciones = []
-        best_indics = []
-        categories = []
-
+        best_objs, best_specs, best_scores, best_acciones, best_indics, categories = [], [], [], [], [], []
         for _, row in df.iterrows():
-            text = build_activity_text(row)
+            text = " ".join(str(x) for x in row.values if str(x).strip())
             match, score = match_activity_to_plan(text, plan_index, objective_hint=objective_hint)
             if match is None:
-                best_objs.append(None); best_specs.append(None); best_scores.append(0); best_acciones.append(""); best_indics.append(""); categories.append("nula")
-                continue
+                best_objs.append(None); best_specs.append(None); best_scores.append(0); best_acciones.append(""); best_indics.append(""); categories.append("nula"); continue
             ok_objective = (objective_hint is None) or (match["objetivo"] == objective_hint)
             cat = classify_consistency(score, ok_objective, thresholds)
             categories.append(cat)
-            best_objs.append(match["objetivo"])
-            best_specs.append(match["especifico"])
-            best_scores.append(score)
-            best_acciones.append(match.get("accion",""))
-            best_indics.append(", ".join(match.get("indicadores",[])))
+            best_objs.append(match["objetivo"]); best_specs.append(match["especifico"]); best_scores.append(score)
+            best_acciones.append(match.get("accion","")); best_indics.append(", ".join(match.get("indicadores",[])))
 
         df["pei_objetivo"] = best_objs
         df["pei_especifico"] = best_specs
@@ -217,7 +178,6 @@ def compute_consistency_with_plan(dfs: List[pd.DataFrame], names: List[str], pla
             "Consistencia parcial": int(counts.get("parcial",0)),
             "Consistencia nula": int(counts.get("nula",0))
         })
-
         detail_tables.append((name, df))
 
         mat = df.groupby(["pei_objetivo","clasificacion_calculada"]).size().unstack(fill_value=0)
@@ -227,15 +187,59 @@ def compute_consistency_with_plan(dfs: List[pd.DataFrame], names: List[str], pla
 
     summary_df = pd.DataFrame(summary_rows)
     matrix_df = pd.concat(matrix_rows, ignore_index=True) if matrix_rows else pd.DataFrame()
-
     return summary_df, detail_tables, matrix_df
 
+# =============================
+# Modo B: correlación CSV col2↔col1
+# =============================
+
+def compute_pairwise_consistency(dfs: List[pd.DataFrame], names: List[str], columns: List[Tuple[str,str]], thresholds: Dict[str,float]):
+    detail_tables, summary_rows = [], []
+    for name, df, (col_obj, col_act) in zip(names, dfs, columns):
+        df = clean_rows(df.copy())
+        if not len(df): 
+            continue
+        # si vienen por índice, convierto a nombre
+        if isinstance(col_obj, int): col_obj = df.columns[col_obj]
+        if isinstance(col_act, int): col_act = df.columns[col_act]
+
+        scores, cats = [], []
+        for _, row in df.iterrows():
+            a = normalize_text(row.get(col_obj, ""))
+            b = normalize_text(row.get(col_act, ""))
+            s = fuzz.token_set_ratio(a, b)
+            ok_obj = True  # en este modo no exigimos objetivo externo
+            # umbrales más duros por defecto (equivalentes a modo A)
+            cat = classify_consistency(float(s), ok_obj, thresholds)
+            scores.append(float(s)); cats.append(cat)
+        df["score_obj_vs_act"] = scores
+        df["clasificacion_calculada"] = cats
+        df["col_objetivo"] = col_obj
+        df["col_actividad"] = col_act
+
+        counts = df["clasificacion_calculada"].value_counts(dropna=False).to_dict()
+        total = int(len(df))
+        summary_rows.append({
+            "Objetivo (archivo)": name,
+            "Total actividades": total,
+            "Consistencia plena": int(counts.get("plena",0)),
+            "Consistencia parcial": int(counts.get("parcial",0)),
+            "Consistencia nula": int(counts.get("nula",0))
+        })
+        detail_tables.append((name, df))
+
+    summary_df = pd.DataFrame(summary_rows)
+    return summary_df, detail_tables
+
+# =============================
+# Reportes
+# =============================
+
 def build_excel_report(summary_df: pd.DataFrame, detail_tables, labels_used=None, matrix_df: pd.DataFrame=None):
-    """Excel con Resumen (solo conteos), Porcentajes y Matriz."""
     from pandas import ExcelWriter
     bio = BytesIO()
     with ExcelWriter(bio, engine="openpyxl") as writer:
-        # Resumen (sin 'Sin clasificar' ni columnas de %) 
+        # Resumen (solo conteos)
         summary_df.to_excel(writer, index=False, sheet_name="Resumen")
 
         # Porcentajes
@@ -244,7 +248,6 @@ def build_excel_report(summary_df: pd.DataFrame, detail_tables, labels_used=None
             for col in ["Consistencia plena","Consistencia parcial","Consistencia nula"]:
                 p[f"% {col}"] = (p[col] / p["Total actividades"]).round(4)
             p = p[["Objetivo (archivo)", "% Consistencia plena", "% Consistencia parcial", "% Consistencia nula"]]
-            # fila global
             T = float(summary_df["Total actividades"].sum())
             if T > 0:
                 g = pd.DataFrame([{
@@ -256,17 +259,15 @@ def build_excel_report(summary_df: pd.DataFrame, detail_tables, labels_used=None
                 p = pd.concat([p, g], ignore_index=True)
             p.to_excel(writer, index=False, sheet_name="Porcentajes")
 
-        # Matriz por objetivo (si existe)
+        # Matriz (solo aplica en modo A)
         if isinstance(matrix_df, pd.DataFrame) and not matrix_df.empty:
             matrix_df.to_excel(writer, index=False, sheet_name="Matriz_Objetivos")
 
-        # Detalle por archivo
+        # Detalle
         for name, table in detail_tables:
             sheet = (name[:30] or "Detalle").replace("/", "-")
             table.to_excel(writer, index=False, sheet_name=sheet)
 
-        if labels_used:
-            pd.DataFrame.from_dict(labels_used, orient="index").to_excel(writer, sheet_name="Etiquetas", header=False)
     bio.seek(0)
     return bio.getvalue()
 
@@ -287,11 +288,9 @@ def build_word_report(summary_df: pd.DataFrame, totals, names):
     doc = Document()
     style = doc.styles["Normal"]; style.font.name = "Times New Roman"; style.font.size = Pt(11)
 
-    doc.add_heading("Informe de correlación con PEI (Automático)", level=1)
-    doc.add_paragraph(f"Total de actividades analizadas: {T}.")
-    doc.add_paragraph(f"Consistencia plena: {P} ({pct(P,T)}%).  Consistencia parcial: {Pa} ({pct(Pa,T)}%).  Consistencia nula: {N} ({pct(N,T)}%).")
+    doc.add_heading("Informe de correlación automática", level=1)
+    doc.add_paragraph(f"Total de actividades: {T}. Plena: {P} ({pct(P,T)}%). Parcial: {Pa} ({pct(Pa,T)}%). Nula: {N} ({pct(N,T)}%).")
 
-    # Tabla resumen (solo conteos)
     if not summary_df.empty:
         cols = ["Objetivo (archivo)","Total actividades","Consistencia plena","Consistencia parcial","Consistencia nula"]
         table = doc.add_table(rows=1, cols=len(cols))
