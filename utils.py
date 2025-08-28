@@ -18,7 +18,8 @@ def normalize_text(s: str) -> str:
     s = strip_accents(str(s).lower())
     s = re.sub(r"[^a-z0-9áéíóúñ\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    tokens = [t for t in s.split() if t not in SPANISH_STOP and len(t) > 1]
+    # Reducir filtrado - mantener tokens más cortos también
+    tokens = [t for t in s.split() if t not in SPANISH_STOP and len(t) > 0]  # Cambió de len(t) > 1 a len(t) > 0
     return " ".join(tokens)
 
 def normalize_colnames(df: pd.DataFrame) -> pd.DataFrame:
@@ -31,18 +32,34 @@ def normalize_colnames(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def has_real_activity(v) -> bool:
-    """Verifica si una celda contiene una actividad real (no 'None', etc.)"""
+    """Verifica si una celda contiene una actividad real - CRITERIO MENOS RESTRICTIVO"""
     if pd.isna(v):
         return False
-    v_str = str(v).strip().lower()
-    return v_str not in NO_ACTIVITY_TOKENS and len(v_str) > 0
+    v_str = str(v).strip()
+    
+    # Solo excluir valores completamente vacíos o explícitamente marcados como "sin contenido"
+    if len(v_str) == 0:
+        return False
+    if v_str.lower() in ["none", "nan", "null", ""]:
+        return False
+    
+    # Aceptar casi cualquier otro contenido, incluso muy corto
+    return True
 
 def has_objective_assigned(v) -> bool:
-    """Verifica si una celda tiene objetivo asignado"""
+    """Verifica si una celda tiene objetivo asignado - CRITERIO MENOS RESTRICTIVO"""
     if pd.isna(v):
         return False
-    v_str = str(v).strip().lower()
-    return v_str not in NO_ACTIVITY_TOKENS and len(v_str) > 0
+    v_str = str(v).strip()
+    
+    # Solo excluir valores completamente vacíos o explícitamente sin contenido
+    if len(v_str) == 0:
+        return False
+    if v_str.lower() in ["none", "nan", "null", ""]:
+        return False
+    
+    # Aceptar prácticamente cualquier contenido como objetivo válido
+    return True
 
 def clean_rows(df: pd.DataFrame) -> pd.DataFrame:
     """Limpieza mínima"""
@@ -145,7 +162,7 @@ def detect_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
     return obj_col, act_col
 
 def analyze_participant_completeness(df: pd.DataFrame) -> Dict[str, Any]:
-    """Analiza completitud por participante considerando TODOS los pares objetivo-actividad"""
+    """Analiza completitud por participante - CRITERIOS MENOS RESTRICTIVOS"""
     pairs = detect_all_objective_activity_pairs(df)
     
     if not pairs:
@@ -168,10 +185,14 @@ def analyze_participant_completeness(df: pd.DataFrame) -> Dict[str, Any]:
             obj_val = row.get(obj_col, "")
             act_val = row.get(act_col, "")
             
-            # Si tiene tanto objetivo como actividad válidos
-            if has_objective_assigned(obj_val) and has_real_activity(act_val):
+            # MENOS RESTRICTIVO: considerar válido si tiene actividad, 
+            # incluso sin objetivo específico válido
+            if has_real_activity(act_val):
                 participant_has_activity = True
                 total_activities += 1
+                
+                # Bonus: si también tiene objetivo, es aún mejor
+                # pero no es requisito absoluto
         
         if participant_has_activity:
             complete_participants += 1
@@ -185,7 +206,7 @@ def analyze_participant_completeness(df: pd.DataFrame) -> Dict[str, Any]:
     }
 
 def extract_all_activities(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Extrae TODAS las actividades de todos los pares objetivo-actividad"""
+    """Extrae TODAS las actividades de todos los pares objetivo-actividad - MENOS RESTRICTIVO"""
     pairs = detect_all_objective_activity_pairs(df)
     activities = []
     
@@ -194,13 +215,14 @@ def extract_all_activities(df: pd.DataFrame) -> List[Dict[str, Any]]:
             obj_val = row.get(obj_col, "")
             act_val = row.get(act_col, "")
             
-            # Solo incluir si tiene actividad real
+            # CRITERIO MENOS RESTRICTIVO: incluir actividades incluso sin objetivo válido
+            # si tiene contenido en actividad
             if has_real_activity(act_val):
                 activities.append({
                     'participant_id': participant_idx,
                     'objetivo_col': obj_col,
                     'actividad_col': act_col,
-                    'objetivo_text': str(obj_val),
+                    'objetivo_text': str(obj_val) if has_objective_assigned(obj_val) else "",
                     'actividad_text': str(act_val),
                     'has_objetivo': has_objective_assigned(obj_val)
                 })
