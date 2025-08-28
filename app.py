@@ -29,7 +29,7 @@ if "file_bufs" not in st.session_state:
 
 uploaded = st.file_uploader(
     "Subí 1 o más archivos CSV (hasta completar 6)",
-    type=["csv"],
+    type=["csv","xlsx","xls"],
     accept_multiple_files=True,
     help="Podés subirlos en tandas; cuando haya 6, se habilita el análisis."
 )
@@ -68,17 +68,29 @@ files = []
 for name, data in zip(st.session_state.file_names, st.session_state.file_bufs):
     files.append(io.BytesIO(data)); files[-1].name = name  # tipo simple con atributo name
 
+
 dfs = []
 names = []
 for f in files:
+    name = f.name
+    suffix = Path(name).suffix.lower()
     try:
-        df = pd.read_csv(f, encoding="utf-8", sep=None, engine="python")
-    except Exception:
-        f.seek(0)
-        df = pd.read_csv(f, encoding="latin-1", sep=None, engine="python")
+        if suffix in [".xlsx", ".xls"]:
+            f.seek(0)
+            df = pd.read_excel(f, engine="openpyxl")
+        else:
+            f.seek(0)
+            try:
+                df = pd.read_csv(f, encoding="utf-8", sep=None, engine="python")
+            except Exception:
+                f.seek(0)
+                df = pd.read_csv(f, encoding="latin-1", sep=None, engine="python")
+    except Exception as e:
+        st.error(f"❌ No pude leer '{name}'. Asegurate de que sea CSV/XLSX válido. Detalle: {e}")
+        st.stop()
     df = normalize_colnames(df)
     dfs.append(df)
-    names.append(Path(f.name).stem)
+    names.append(Path(name).stem)
 
 st.success("✅ Se recibieron 6 archivos correctamente.")
 
