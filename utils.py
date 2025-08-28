@@ -295,15 +295,7 @@ def compute_pairwise_consistency_single(df: pd.DataFrame, name: str, col_obj: st
         "Consistencia nula": int(counts.get("nula", 0))
     }
     
-# -------------------- Reportes --------------------
-def excel_from_blocks(blocks: List[Tuple[str, pd.DataFrame]]):
-    from pandas import ExcelWriter
-    bio = BytesIO()
-    with ExcelWriter(bio, engine="openpyxl") as writer:
-        for sheet, df in blocks:
-            df.to_excel(writer, index=False, sheet_name=sheet[:31])
-    bio.seek(0)
-    return bio.getvalue()
+    return summary, out
 
 # -------------------- PEI --------------------
 def parse_pei_pdf(file_like) -> Dict[str, Any]:
