@@ -1,14 +1,20 @@
+
 from io import BytesIO
 import re
 import unicodedata
 from typing import List, Dict, Any, Tuple, Optional
+import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz
-from pypdf import PdfReader
 
-# -------------------- Helpers --------------------
-NO_ACTIVITY_TOKENS = {"", "nan", "none", "null", "n/a", "na", "-", "–", "—"}
+# Evitar ImportError si no está pypdf instalado (no siempre usamos PDF)
+try:
+    from pypdf import PdfReader  # type: ignore
+except Exception:  # pragma: no cover
+    PdfReader = None  # se maneja dentro de la función
 
+# -------------------- Normalización --------------------
+EMPTY_TOKENS = {"", "nan", "none", "-", "—", "–"}
 SPANISH_STOP = set("""a al algo alguna algunas alguno algunos ante antes como con contra cual cuales cuando de del desde donde dos el la los las en entre era erais eramos eran es esa esas ese eso esos esta estas este esto estos fue fuerais fuéramos fueran fui fuimos ha haber habia había habiais habíamos habían han has hasta hay la lo las los le les mas más me mi mis mucho muy nada ni no nos nosotras nosotros o os otra otras otro otros para pero poco por porque que quien quienes se sin sobre sois somos son soy su sus te tenia tenía teniais teníamos tenían tengo ti tu tus un una uno unas unos y ya""".split())
 
 def strip_accents(s: str) -> str:
@@ -18,8 +24,7 @@ def normalize_text(s: str) -> str:
     s = strip_accents(str(s).lower())
     s = re.sub(r"[^a-z0-9áéíóúñ\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    # Reducir filtrado - mantener tokens más cortos también
-    tokens = [t for t in s.split() if t not in SPANISH_STOP and len(t) > 0]  # Cambió de len(t) > 1 a len(t) > 0
+    tokens = [t for t in s.split() if t not in SPANISH_STOP and len(t) > 2]
     return " ".join(tokens)
 
 def normalize_colnames(df: pd.DataFrame) -> pd.DataFrame:
@@ -31,274 +36,176 @@ def normalize_colnames(df: pd.DataFrame) -> pd.DataFrame:
     out.columns = [norm(c) for c in out.columns]
     return out
 
-def has_real_activity(v) -> bool:
-    """Verifica si una celda contiene una actividad real - CRITERIO MENOS RESTRICTIVO"""
-    if pd.isna(v):
-        return False
-    v_str = str(v).strip()
-    
-    # Solo excluir valores completamente vacíos o explícitamente marcados como "sin contenido"
-    if len(v_str) == 0:
-        return False
-    if v_str.lower() in ["none", "nan", "null", ""]:
-        return False
-    
-    # Aceptar casi cualquier otro contenido, incluso muy corto
-    return True
-
-def has_objective_assigned(v) -> bool:
-    """Verifica si una celda tiene objetivo asignado - CRITERIO MENOS RESTRICTIVO"""
-    if pd.isna(v):
-        return False
-    v_str = str(v).strip()
-    
-    # Solo excluir valores completamente vacíos o explícitamente sin contenido
-    if len(v_str) == 0:
-        return False
-    if v_str.lower() in ["none", "nan", "null", ""]:
-        return False
-    
-    # Aceptar prácticamente cualquier contenido como objetivo válido
-    return True
+def is_empty_value(v) -> bool:
+    return str(v).strip().lower() in EMPTY_TOKENS
 
 def clean_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Limpieza mínima"""
     if df is None or df.empty:
         return df
-    return df.dropna(how='all').reset_index(drop=True)
+    tmp = df.dropna(how="all", axis=1)
+    def row_empty(r):
+        for v in r:
+            s = str(v).strip().lower()
+            if s not in EMPTY_TOKENS:
+                return False
+        return True
+    mask = tmp.apply(row_empty, axis=1)
+    return tmp.loc[~mask].reset_index(drop=True)
 
-def detect_all_objective_activity_pairs(df: pd.DataFrame) -> List[Tuple[str, str]]:
-    """Detecta TODOS los pares de columnas (objetivo específico, actividad) excluyendo detalles"""
+def detect_columns(df: pd.DataFrame):
     cols = list(df.columns)
-    pairs = []
-    
-    # Patrones para objetivos específicos
-    obj_patterns = [
-        r"objetivos?\s+especific\w*\s*(\d+)",
-        r"objetivo\s+especific\w*\s*(\d+)",
-        r"especific\w*\s+(\d+)"
-    ]
-    
-    # Patrones para actividades (excluyendo "detalle")
-    act_patterns = [
-        r"actividad\w*\s+objetivo\s*(\d+)",
-        r"actividad\w*\s+(\d+)",
-        r"accion\w*\s+(\d+)",
-        r"actividades\s+totales\s+objetivo\s+(\d+)"
-    ]
-    
-    # Encontrar columnas de objetivos específicos numeradas
-    obj_cols = {}
-    for col in cols:
-        # Excluir columnas que contengan "detalle"
-        if "detalle" in col.lower():
-            continue
-        for pattern in obj_patterns:
-            match = re.search(pattern, col, re.IGNORECASE)
-            if match:
-                num = match.group(1)
-                obj_cols[num] = col
-                break
-    
-    # Encontrar columnas de actividades numeradas (sin detalle)
-    act_cols = {}
-    for col in cols:
-        # EXCLUIR explícitamente columnas de detalle
-        if "detalle" in col.lower():
-            continue
-        for pattern in act_patterns:
-            match = re.search(pattern, col, re.IGNORECASE)
-            if match:
-                num = match.group(1)
-                act_cols[num] = col
-                break
-    
-    # También buscar patrones más generales para actividades
-    if not act_cols:
-        for col in cols:
-            if "detalle" in col.lower():
-                continue
-            if any(word in col.lower() for word in ["actividad", "accion"]):
-                # Extraer número si existe
-                num_match = re.search(r"(\d+)", col)
-                if num_match:
-                    num = num_match.group(1)
-                    act_cols[num] = col
-    
-    # Emparejar por número
-    for num in sorted(obj_cols.keys()):
-        if num in act_cols:
-            pairs.append((obj_cols[num], act_cols[num]))
-    
-    # Si no encontramos pares numerados, usar detección simple
-    if not pairs:
-        pairs = [detect_columns(df)]
-    
-    return [p for p in pairs if p[0] and p[1]]
-
-def detect_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
-    """Detección simple de una columna objetivo y una actividad (excluyendo detalle)"""
-    cols = list(df.columns)
-    
-    # Candidatos de objetivo (excluyendo detalle)
     obj_candidates = [c for c in cols if any(k in c for k in [
-        "objetivo especific", "objetivos especific", "objetivo espe", "especifico"
-    ]) and "detalle" not in c.lower()]
-    
-    # Candidatos de actividad (excluyendo detalle)  
+        "objetivo especific", "objetivos especific", "objetivo espe", "objetivo 1", "obj 1", "especifico"
+    ])]
     act_candidates = [c for c in cols if any(k in c for k in [
-        "actividad", "actividades objetivo", "actividad objetivo", "accion", "acciones"
-    ]) and "detalle" not in c.lower()]
-    
-    obj_col = obj_candidates[0] if obj_candidates else None
-    
-    # Para actividad, preferir columnas distintas de obj y sin "detalle"
-    act_candidates = [c for c in act_candidates if c != obj_col] 
-    if not act_candidates:
-        # Buscar cualquier columna sin "detalle" que no sea obj
-        act_candidates = [c for c in cols if c != obj_col and "detalle" not in c.lower()]
-    
+        "actividades objetivo", "actividad objetivo", "actividad", "acciones", "accion"
+    ])]
+    obj_col = obj_candidates[0] if obj_candidates else (cols[0] if cols else None)
+    act_candidates = [c for c in act_candidates if c != obj_col] or [c for c in cols if c != obj_col]
     act_col = act_candidates[0] if act_candidates else None
     return obj_col, act_col
 
-def analyze_participant_completeness(df: pd.DataFrame) -> Dict[str, Any]:
-    """Analiza completitud por participante - CRITERIOS MENOS RESTRICTIVOS"""
-    pairs = detect_all_objective_activity_pairs(df)
-    
-    if not pairs:
-        return {
-            'total_participants': len(df),
-            'complete_participants': 0,
-            'incomplete_participants': len(df),
-            'total_activities': 0,
-            'pairs_detected': 0
-        }
-    
-    complete_participants = 0
-    total_activities = 0
-    
-    for _, row in df.iterrows():
-        participant_has_activity = False
-        
-        # Revisar todos los pares objetivo-actividad para este participante
-        for obj_col, act_col in pairs:
-            obj_val = row.get(obj_col, "")
-            act_val = row.get(act_col, "")
-            
-            # MENOS RESTRICTIVO: considerar válido si tiene actividad, 
-            # incluso sin objetivo específico válido
-            if has_real_activity(act_val):
-                participant_has_activity = True
-                total_activities += 1
-                
-                # Bonus: si también tiene objetivo, es aún mejor
-                # pero no es requisito absoluto
-        
-        if participant_has_activity:
-            complete_participants += 1
-    
-    return {
-        'total_participants': len(df),
-        'complete_participants': complete_participants,
-        'incomplete_participants': len(df) - complete_participants,
-        'total_activities': total_activities,
-        'pairs_detected': len(pairs)
-    }
+def count_valid_pairs(df: pd.DataFrame, col_obj: str, col_act: str) -> int:
+    def ok(v): return not is_empty_value(v)
+    return int(((df[col_obj].apply(ok)) & (df[col_act].apply(ok))).sum())
 
-def extract_all_activities(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Extrae TODAS las actividades de todos los pares objetivo-actividad - MENOS RESTRICTIVO"""
-    pairs = detect_all_objective_activity_pairs(df)
-    activities = []
-    
-    for participant_idx, row in df.iterrows():
-        for obj_col, act_col in pairs:
-            obj_val = row.get(obj_col, "")
-            act_val = row.get(act_col, "")
-            
-            # CRITERIO MENOS RESTRICTIVO: incluir actividades incluso sin objetivo válido
-            # si tiene contenido en actividad
-            if has_real_activity(act_val):
-                activities.append({
-                    'participant_id': participant_idx,
-                    'objetivo_col': obj_col,
-                    'actividad_col': act_col,
-                    'objetivo_text': str(obj_val) if has_objective_assigned(obj_val) else "",
-                    'actividad_text': str(act_val),
-                    'has_objetivo': has_objective_assigned(obj_val)
-                })
-    
-    return activities
+# -------------------- Consistencia Independiente (col 2 vs col 1) --------------------
+def classify(score: float, thr_full=88.0, thr_partial=68.0) -> str:
+    if score >= thr_full:
+        return "plena"
+    if score >= thr_partial:
+        return "parcial"
+    return "nula"
 
-# -------------------- Consistencia --------------------
-def compute_pairwise_consistency_single(df: pd.DataFrame, name: str, col_obj: str, col_act: str, thresholds: Dict[str,float]):
-    """Procesa todas las actividades de todos los pares objetivo-actividad"""
+def best_alt_objective(activity_norm: str, current_obj: str, unique_objs_norm):
+    """Mejor objetivo alternativo (texto y score) para la actividad (excluye el objetivo actual)."""
+    best_txt, best_score = None, -1.0
+    cur_norm = normalize_text(current_obj)
+    for raw, norm in unique_objs_norm:
+        if norm == cur_norm:
+            continue
+        s = fuzz.token_set_ratio(activity_norm, norm)
+        if s > best_score:
+            best_score = s; best_txt = raw
+    return best_txt, float(best_score)
+
+def analyze_independent(df: pd.DataFrame, name: str, col_obj: str, col_act: str, thr_full=88.0, thr_partial=68.0):
+    """Devuelve:
+       - resumen (dict)
+       - detalle (DataFrame) con columnas extra pedidas
+       - perf_obj (DataFrame rendimiento por objetivo)
+       - mejoras (DataFrame sugerencias con Δ p.p. >= 15)
+       - duplicadas (DataFrame sospecha de duplicados)
+    """
     df = clean_rows(df.copy())
-    
-    # En lugar de usar solo las columnas seleccionadas, extraer todas las actividades
-    all_activities = extract_all_activities(df)
-    
-    if not all_activities:
-        summary = {
-            "Fuente": name,
-            "Total actividades": 0,
-            "Consistencia plena": 0,
-            "Consistencia parcial": 0,
-            "Consistencia nula": 0
-        }
-        return summary, pd.DataFrame()
-    
-    activities_data = []
-    
-    for activity in all_activities:
-        objective_text = activity['objetivo_text']
-        activity_text = activity['actividad_text']
-        
-        # Si no tiene objetivo, usar genérico
-        if not activity['has_objetivo']:
-            objective_text = "objetivo actividad universitaria educacion plan estrategico institucional"
-        
-        # Normalizar textos
-        a = normalize_text(objective_text)
-        b = normalize_text(activity_text)
-        
-        # Valores por defecto
-        if not a.strip():
-            a = "objetivo universitario educacion plan"
-        if not b.strip():
-            b = "actividad educativa tarea universitaria"
-            
-        score = fuzz.token_set_ratio(a, b)
-        classification = classify_consistency(float(score), True, thresholds)
-        
-        activities_data.append({
-            'objetivo_original': activity['objetivo_col'],
-            'actividad_original': activity['actividad_col'],
-            'objetivo_text': objective_text,
-            'actividad_text': activity_text,
-            'score_obj_vs_act': float(score),
-            'clasificacion_calculada': classification,
-            'participant_id': activity['participant_id'],
-            'has_objetivo': activity['has_objetivo']
-        })
-    
-    out = pd.DataFrame(activities_data)
-    
-    # Contar por clasificación
-    counts = out['clasificacion_calculada'].value_counts().to_dict()
-    total = len(activities_data)
-    
-    summary = {
-        "Fuente": name,
-        "Total actividades": total,
-        "Consistencia plena": int(counts.get("plena", 0)),
-        "Consistencia parcial": int(counts.get("parcial", 0)),
-        "Consistencia nula": int(counts.get("nula", 0))
-    }
-    
-    return summary, out
+    valid_mask = (~df[col_obj].apply(is_empty_value)) & (~df[col_act].apply(is_empty_value))
+    data = df.loc[valid_mask].reset_index(drop=True).copy()
 
-# -------------------- PEI --------------------
+    # normalizados
+    data["_obj_norm"] = data[col_obj].astype(str).map(normalize_text)
+    data["_act_norm"] = data[col_act].astype(str).map(normalize_text)
+
+    # set de objetivos
+    unique_objs = list(dict.fromkeys(data[col_obj].astype(str).tolist()))
+    unique_objs_norm = [(t, normalize_text(t)) for t in unique_objs]
+
+    # scores, categorías y sugerencias
+    scores, cats, alt_objs, alt_scores, deltas = [], [], [], [], []
+    for o_raw, a_raw, o, a in zip(data[col_obj], data[col_act], data["_obj_norm"], data["_act_norm"]):
+        s = fuzz.token_set_ratio(o, a)
+        cat = classify(float(s), thr_full, thr_partial)
+        alt_txt, alt_s = best_alt_objective(a, str(o_raw), unique_objs_norm)
+        scores.append(float(s)); cats.append(cat); alt_objs.append(alt_txt); alt_scores.append(float(alt_s)); deltas.append(float(alt_s - s))
+
+    # --- columnas pedidas ---
+    data["Actividad (seleccionada)"] = data[col_act].astype(str)
+    data["Mejor objetivo propuesto"] = alt_objs
+    data["% si se ubica en objetivo propuesto"] = [round(x,1) for x in alt_scores]
+
+    # info de situación actual
+    data["score_obj_vs_act"] = scores
+    data["clasificacion"] = cats
+    data["Δ p.p. (objetivo propuesto - actual)"] = [round(x,1) for x in deltas]
+
+    # Resumen
+    counts = data["clasificacion"].value_counts(dropna=False).to_dict()
+    total = len(data)
+    resumen = {
+        "Fuente": name,
+        "Total actividades": int(total),
+        "Consistencia plena": int(counts.get("plena",0)),
+        "Consistencia parcial": int(counts.get("parcial",0)),
+        "Consistencia nula": int(counts.get("nula",0))
+    }
+
+    # Rendimiento por objetivo
+    g = data.groupby(col_obj)["score_obj_vs_act"].agg(["count","mean","median"])
+    g["p25"] = data.groupby(col_obj)["score_obj_vs_act"].quantile(0.25)
+    g["p75"] = data.groupby(col_obj)["score_obj_vs_act"].quantile(0.75)
+    g["std"] = data.groupby(col_obj)["score_obj_vs_act"].std(ddof=0)
+    lvl = data.assign(_low = data["clasificacion"].eq("nula")).groupby(col_obj)["_low"].mean().rename("% en Bajo")
+    perf_obj = g.join(lvl).reset_index().rename(columns={col_obj:"Objetivo específico","count":"N","mean":"Promedio","median":"Mediana"})
+    perf_obj["% en Bajo"] = (perf_obj["% en Bajo"]*100).round(1)
+    perf_obj = perf_obj.sort_values("% en Bajo", ascending=False)
+
+    # Potencial de reubicación (ganancia >= 15 p.p.)
+    mejoras = data.copy()
+    mejoras = mejoras.loc[mejoras["Δ p.p. (objetivo propuesto - actual)"] >= 15.0].sort_values("Δ p.p. (objetivo propuesto - actual)", ascending=False)
+    mejoras = mejoras[[
+        "Actividad (seleccionada)",  # actividad
+        col_obj,                      # objetivo actual
+        "score_obj_vs_act",           # % actual
+        "Mejor objetivo propuesto",   # objetivo sugerido
+        "% si se ubica en objetivo propuesto",  # % sugerido
+        "Δ p.p. (objetivo propuesto - actual)"
+    ]].rename(columns={
+        "Actividad (seleccionada)":"Actividad",
+        col_obj:"Obj. actual",
+        "score_obj_vs_act":"% actual",
+        "Mejor objetivo propuesto":"Obj. sugerido",
+        "% si se ubica en objetivo propuesto":"% sugerido",
+        "Δ p.p. (objetivo propuesto - actual)":"Δ p.p."
+    })
+    mejoras["% actual"] = mejoras["% actual"].round(1)
+    mejoras["% sugerido"] = mejoras["% sugerido"].round(1)
+    mejoras["Δ p.p."] = mejoras["Δ p.p."].round(1)
+
+    # Duplicadas
+    dup = (data.assign(act_norm=data["_act_norm"])
+               .groupby("act_norm").size().reset_index(name="Repeticiones"))
+    dup = dup.loc[dup["Repeticiones"]>1].sort_values("Repeticiones", ascending=False)
+    dup = dup.rename(columns={"act_norm":"Actividad (normalizada)"})
+
+    return resumen, data, perf_obj, mejoras, dup
+
+# -------------------- Exportadores --------------------
+def excel_consolidado(resumen: Dict[str,int], detalle: pd.DataFrame,
+                      perf_obj: pd.DataFrame, mejoras: pd.DataFrame, duplicadas: pd.DataFrame):
+    """Excel tipo 'informe_consistencia_pei_consolidado' con columnas pedidas."""
+    from pandas import ExcelWriter
+    bio = BytesIO()
+    with ExcelWriter(bio, engine="openpyxl") as writer:
+        pd.DataFrame([resumen]).to_excel(writer, index=False, sheet_name="Resumen")
+        p = pd.DataFrame([{
+            "Fuente": resumen["Fuente"],
+            "% Consistencia plena": round(resumen["Consistencia plena"]/max(resumen["Total actividades"],1),4),
+            "% Consistencia parcial": round(resumen["Consistencia parcial"]/max(resumen["Total actividades"],1),4),
+            "% Consistencia nula": round(resumen["Consistencia nula"]/max(resumen["Total actividades"],1),4),
+        }])
+        p.to_excel(writer, index=False, sheet_name="Porcentajes")
+        perf_obj.to_excel(writer, index=False, sheet_name="Rendimiento_por_objetivo")
+        mejoras.to_excel(writer, index=False, sheet_name="Potencial_reubicacion")
+        duplicadas.to_excel(writer, index=False, sheet_name="Duplicadas")
+        # Detalle incluye las nuevas 3 columnas pedidas
+        detalle.to_excel(writer, index=False, sheet_name="Detalle")
+    bio.seek(0)
+    return bio.getvalue()
+
+# -------------------- (Opcional) Parseo PEI PDF seguro --------------------
 def parse_pei_pdf(file_like) -> Dict[str, Any]:
+    if PdfReader is None:
+        # Si no hay pypdf instalado devolvemos índice vacío y evitamos romper import
+        return {}
     reader = PdfReader(file_like)
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
     text_norm = strip_accents(text)
@@ -339,148 +246,3 @@ def parse_pei_pdf(file_like) -> Dict[str, Any]:
                 if not re.match(r"^OBJETIVO", l, re.IGNORECASE) and not re_spec.match(l):
                     obj_map[current_obj]["especificos"][current_spec]["indicadores"].append(l)
     return obj_map
-
-def build_plan_index(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
-    index = []
-    for obj, objdata in plan.items():
-        for spec, sdata in (objdata.get("especificos", {}) or {}).items():
-            acciones = sdata.get("acciones", []) or []
-            indicadores = sdata.get("indicadores", []) or []
-            if not acciones and not indicadores:
-                index.append({"objetivo": obj, "especifico": spec, "texto": normalize_text(sdata.get("titulo","")), "tipo": "titulo"})
-            else:
-                for a in (acciones or [""]):
-                    text = " ".join([a] + indicadores)
-                    index.append({"objetivo": obj, "especifico": spec, "texto": normalize_text(text), "tipo": "accion_indicadores", "accion": a, "indicadores": indicadores})
-    return [e for e in index if e.get("texto")]
-
-def classify_consistency(score: float, ok_objective: bool, thresholds: Dict[str, float]) -> str:
-    t_plena = thresholds.get("plena", 88.0)
-    t_parcial = thresholds.get("parcial", 68.0)
-    if score >= t_plena and ok_objective:
-        return "plena"
-    if score >= t_parcial:
-        return "parcial"
-    return "nula"
-
-def compute_consistency_pei_single(df: pd.DataFrame, name: str, col_act: str, plan_index: List[Dict[str,Any]], thresholds: Dict[str,float]):
-    """Analiza todas las actividades extraídas contra el PEI"""
-    df = clean_rows(df.copy())
-    
-    all_activities = extract_all_activities(df)
-    
-    if not all_activities:
-        summary = {
-            "Fuente": name,
-            "Total actividades": 0,
-            "Consistencia plena": 0,
-            "Consistencia parcial": 0,
-            "Consistencia nula": 0
-        }
-        return summary, pd.DataFrame()
-    
-    activities_data = []
-    
-    for activity in all_activities:
-        activity_text = activity['actividad_text']
-        text = normalize_text(activity_text)
-        
-        if not text.strip():
-            text = "actividad educativa universitaria plan"
-            
-        best, score = None, -1.0
-        for entry in plan_index:
-            s = fuzz.token_set_ratio(text, entry["texto"])
-            if s > score:
-                best, score = entry, s
-                
-        classification = classify_consistency(float(score), True, thresholds)
-        
-        activities_data.append({
-            'actividad_text': activity_text,
-            'pei_score': float(score),
-            'clasificacion_calculada': classification,
-            'pei_objetivo': best.get("objetivo") if best else None,
-            'pei_especifico': best.get("especifico") if best else None,
-            'participant_id': activity['participant_id']
-        })
-    
-    out = pd.DataFrame(activities_data)
-    
-    counts = out['clasificacion_calculada'].value_counts().to_dict()
-    total = len(activities_data)
-    
-    summary = {
-        "Fuente": name,
-        "Total actividades": total,
-        "Consistencia plena": int(counts.get("plena", 0)),
-        "Consistencia parcial": int(counts.get("parcial", 0)),
-        "Consistencia nula": int(counts.get("nula", 0))
-    }
-    
-    return summary, out
-
-# -------------------- Reportes --------------------
-def find_best_objective_for_activities(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Para cada actividad, encuentra el mejor objetivo posible y su porcentaje de consistencia"""
-    pairs = detect_all_objective_activity_pairs(df)
-    all_activities = extract_all_activities(df)
-    
-    if not all_activities:
-        return []
-    
-    # Extraer todos los objetivos únicos del formulario
-    unique_objectives = set()
-    for _, row in df.iterrows():
-        for obj_col, act_col in pairs:
-            obj_val = row.get(obj_col, "")
-            if has_objective_assigned(obj_val):
-                unique_objectives.add(str(obj_val).strip())
-    
-    unique_objectives = list(unique_objectives)
-    results = []
-    
-    for activity in all_activities:
-        activity_text = activity['actividad_text']
-        current_objective = activity['objetivo_text']
-        
-        best_objective = ""
-        best_score = 0.0
-        
-        # Comparar esta actividad contra TODOS los objetivos disponibles
-        for test_objective in unique_objectives:
-            if not test_objective or test_objective.lower() in ["none", "nan", "null"]:
-                continue
-                
-            # Normalizar textos
-            norm_obj = normalize_text(test_objective)
-            norm_act = normalize_text(activity_text)
-            
-            # Usar textos por defecto si la normalización elimina todo
-            if not norm_obj.strip():
-                norm_obj = "objetivo universitario educacion"
-            if not norm_act.strip():
-                norm_act = "actividad educativa"
-            
-            # Calcular consistencia
-            score = fuzz.token_set_ratio(norm_obj, norm_act)
-            
-            if score > best_score:
-                best_score = score
-                best_objective = test_objective
-        
-        results.append({
-            'actividad': activity_text,
-            'objetivo_actual': current_objective if current_objective else "Sin objetivo asignado",
-            'mejor_objetivo': best_objective if best_objective else "No se encontró objetivo mejor",
-            'porcentaje_consistencia': round(best_score, 1),
-            'participante_id': activity['participant_id'],
-            'mejora_potencial': round(best_score - fuzz.token_set_ratio(
-                normalize_text(current_objective) if current_objective else "objetivo generico",
-                normalize_text(activity_text)
-            ), 1) if current_objective else round(best_score, 1)
-        })
-    
-    # Ordenar por porcentaje de consistencia descendente
-    results.sort(key=lambda x: x['porcentaje_consistencia'], reverse=True)
-    return results
