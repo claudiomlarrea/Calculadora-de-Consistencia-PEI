@@ -183,9 +183,9 @@ def format_report_for_display(report: Dict[str, Any], completeness: Dict[str, An
 # Informe de Consistencia PEI
 
 ## Resumen de Participación
-- **Total participantes**: {completeness['total_participants']} personas
-- **Participantes con propuestas**: {completeness['complete_participants']} personas ({completeness['complete_participants']/completeness['total_participants']*100:.1f}%)
-- **Sin propuestas**: {completeness['incomplete_participants']} personas
+- **Total participantes**: {completeness['total_participants']} actividades
+- **Actividades con detalle**: {completeness['complete_participants']} actividades ({completeness['complete_participants']/completeness['total_participants']*100:.1f}%)
+- **Sin detalle**: {completeness['incomplete_participants']} actividades
 - **Pares objetivo-actividad detectados**: {completeness['pairs_detected']} columnas
 
 ## Estadísticas de Actividades
@@ -205,7 +205,7 @@ def format_report_for_display(report: Dict[str, Any], completeness: Dict[str, An
         formatted += "⚠️ **Interpretación**: Alta concentración en nivel Bajo sugiere redacciones genéricas u objetivos poco acotados.\n\n"
     
     if completeness['incomplete_participants'] > completeness['complete_participants'] * 0.5:
-        formatted += "⚠️ **Atención**: Un número significativo de participantes no realizó propuestas completas.\n\n"
+        formatted += "⚠️ **Atención**: Un número significativo de actividades no tienen detalle asociado.\n\n"
     
     return formatted
 
@@ -262,18 +262,19 @@ col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric("Total Participantes", completeness['total_participants'])
 with col2:
-    st.metric("Con Propuestas", completeness['complete_participants'])
+    st.metric("Con Detalle", completeness['complete_participants'])
 with col3:
-    st.metric("Sin Propuestas", completeness['incomplete_participants'])
+    st.metric("Sin Detalle", completeness['incomplete_participants'])
 with col4:
     st.metric("Total Actividades", completeness['total_activities'])
 
 # Explicación del análisis
 st.info(f"""
 📋 **Metodología de Análisis**:
-- **Completitud por participante**: Una persona se considera "con propuestas" si tiene AL MENOS un par objetivo-actividad completo en cualquiera de las {len(all_pairs)} columnas detectadas
+- **Completitud por participante**: Una persona se considera "con detalle" si tiene AL MENOS un par objetivo-actividad completo en cualquiera de las {len(all_pairs)} columnas detectadas
 - **Se analizan**: Todas las actividades extraídas de todas las columnas objetivo-actividad
 - **"None"**: Indica que el participante no propuso actividad para ese objetivo específico
+- **"Sin detalle"**: No se detectó detalle en la actividad relacionada a algún objetivo
 """)
 
 # Análisis por columnas
