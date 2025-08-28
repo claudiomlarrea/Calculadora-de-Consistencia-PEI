@@ -11,6 +11,7 @@ from collections import Counter, defaultdict
 from utils import (
     normalize_colnames, clean_rows, detect_columns, detect_all_objective_activity_pairs,
     compute_pairwise_consistency_single, analyze_participant_completeness, extract_all_activities,
+    find_best_objective_for_activities,
     parse_pei_pdf, build_plan_index, compute_consistency_pei_single,
     excel_from_blocks, normalize_text, has_real_activity, has_objective_assigned
 )
