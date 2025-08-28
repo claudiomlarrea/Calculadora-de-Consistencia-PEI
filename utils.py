@@ -7,7 +7,8 @@ from rapidfuzz import fuzz
 from pypdf import PdfReader
 
 # -------------------- Helpers --------------------
-EMPTY_TOKENS = {"", "nan", "none", "-", "–", "—", "null", "n/a", "na"}
+# Lista MUY reducida - solo valores verdaderamente vacíos
+TRULY_EMPTY_TOKENS = {"", "nan"}  # Solo vacío real y "nan"
 
 SPANISH_STOP = set("""a al algo alguna algunas alguno algunos ante antes como con contra cual cuales cuando de del desde donde dos el la los las en entre era erais eramos eran es esa esas ese eso esos esta estas este esto estos fue fuerais fuéramos fueran fui fuimos ha haber habia había habiais habíamos habían han has hasta hay la lo las los le les mas más me mi mis mucho muy nada ni no nos nosotras nosotros o os otra otras otro otros para pero poco por porque que quien quienes se sin sobre sois somos son soy su sus te tenia tenía teniais teníamos tenían tengo ti tu tus un una uno unas unos y ya""".split())
 
@@ -18,7 +19,7 @@ def normalize_text(s: str) -> str:
     s = strip_accents(str(s).lower())
     s = re.sub(r"[^a-z0-9áéíóúñ\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    tokens = [t for t in s.split() if t not in SPANISH_STOP and len(t) > 2]
+    tokens = [t for t in s.split() if t not in SPANISH_STOP and len(t) > 1]  # Reducido a len > 1
     return " ".join(tokens)
 
 def normalize_colnames(df: pd.DataFrame) -> pd.DataFrame:
@@ -31,29 +32,28 @@ def normalize_colnames(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def is_empty_value(v) -> bool:
-    """Ultra-permisivo: solo considera vacíos valores realmente nulos o palabras vacías específicas"""
+    """ULTRA-INCLUSIVO: Solo considera vacíos los valores pandas NaN y cadenas completamente vacías"""
     if pd.isna(v):
         return True
     v_str = str(v).strip().lower()
-    return v_str in EMPTY_TOKENS
+    # Solo "" y "nan" se consideran vacíos. "None", "-", "null", etc. son TEXTO VÁLIDO
+    return v_str in TRULY_EMPTY_TOKENS
 
-def is_meaningful_text(v, min_length: int = 1) -> bool:
-    """Ultra-permisivo: acepta cualquier texto que no esté explícitamente vacío"""
+def is_meaningful_text(v, min_length: int = 0) -> bool:
+    """ULTRA-INCLUSIVO: acepta CUALQUIER contenido que no sea pandas NaN o cadena vacía"""
     if pd.isna(v):
         return False
     text = str(v).strip()
-    # Si está en la lista de tokens vacíos, no es válido
-    if text.lower() in EMPTY_TOKENS:
-        return False
-    # Cualquier cosa con al menos 1 carácter que no sea solo espacios/símbolos
-    return len(text) >= min_length and text not in ["", " ", "\t", "\n"]
+    # Acepta TODO excepto cadenas completamente vacías
+    # "None", "null", "-", números, etc. son VÁLIDOS
+    return len(text) > 0
 
 def clean_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Limpieza mínima - solo elimina filas completamente vacías"""
+    """Limpieza MÍNIMA - prácticamente no elimina nada"""
     if df is None or df.empty:
         return df
-    # Solo eliminar filas que son completamente vacías en TODAS las columnas
-    return df.dropna(how='all').reset_index(drop=True)
+    # Solo eliminar filas que son completamente vacías en TODAS las columnas importantes
+    return df.dropna(how='all', subset=[col for col in df.columns if 'actividad' in col.lower() or 'objetivo' in col.lower()]).reset_index(drop=True)
 
 def detect_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
     """Devuelve (objetivo_col, actividad_col) por heurística de nombre."""
@@ -73,20 +73,20 @@ def detect_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
     return obj_col, act_col
 
 def count_valid_pairs(df: pd.DataFrame, col_obj: str, col_act: str) -> int:
-    """Cuenta pares donde ambos campos tienen contenido (menos restrictivo)"""
-    valid_obj = df[col_obj].apply(lambda x: is_meaningful_text(x, min_length=1))
-    valid_act = df[col_act].apply(lambda x: is_meaningful_text(x, min_length=1))
+    """Cuenta pares donde ambos campos tienen contenido"""
+    valid_obj = df[col_obj].apply(lambda x: is_meaningful_text(x))
+    valid_act = df[col_act].apply(lambda x: is_meaningful_text(x))
     return int((valid_obj & valid_act).sum())
 
 def count_all_activities(df: pd.DataFrame, col_act: str) -> int:
-    """Cuenta todas las actividades con cualquier contenido"""
-    return int(df[col_act].apply(lambda x: is_meaningful_text(x, min_length=1)).sum())
+    """Cuenta TODAS las actividades con cualquier contenido (incluyendo 'None')"""
+    return int(df[col_act].apply(lambda x: is_meaningful_text(x)).sum())
 
 def count_with_objective(df: pd.DataFrame, col_obj: str) -> int:
     """Cuenta filas con objetivo asignado"""
-    return int(df[col_obj].apply(lambda x: is_meaningful_text(x, min_length=1)).sum())
+    return int(df[col_obj].apply(lambda x: is_meaningful_text(x)).sum())
 
-# -------------------- Consistencia independiente (col2 vs col1) --------------------
+# -------------------- Consistencia independiente --------------------
 def compute_pairwise_consistency_single(df: pd.DataFrame, name: str, col_obj: str, col_act: str, thresholds: Dict[str,float]):
     df = clean_rows(df.copy())
     scores, cats = [], []
@@ -97,24 +97,25 @@ def compute_pairwise_consistency_single(df: pd.DataFrame, name: str, col_obj: st
         activity_text = str(row.get(col_act, ""))
         objective_text = str(row.get(col_obj, ""))
         
-        # Procesar CUALQUIER actividad que tenga contenido (ultra-permisivo)
-        if not is_meaningful_text(activity_text, min_length=1):
+        # PROCESAR TODO lo que tenga contenido, incluyendo "None"
+        if not is_meaningful_text(activity_text):
             continue
             
         valid_rows.append(row)
         
-        # Si no hay objetivo, usar texto genérico
-        if not is_meaningful_text(objective_text, min_length=1):
-            objective_text = "objetivo actividad universitaria educacion plan estrategico"
+        # Si el objetivo está "vacío" (solo NaN o ""), usar texto genérico
+        if not is_meaningful_text(objective_text):
+            objective_text = "objetivo actividad universitaria educacion plan estrategico institucional"
         
+        # Normalizar textos
         a = normalize_text(objective_text)
         b = normalize_text(activity_text)
         
-        # Si después de normalizar no queda nada útil, usar textos por defecto
+        # Si después de normalizar no queda nada, usar textos por defecto
         if not a.strip():
-            a = "objetivo universitario educacion"
+            a = "objetivo universitario educacion plan"
         if not b.strip():
-            b = "actividad educativa universitaria"
+            b = "actividad educativa tarea"
             
         s = fuzz.token_set_ratio(a, b)
         cat = classify_consistency(float(s), True, thresholds)
@@ -122,20 +123,24 @@ def compute_pairwise_consistency_single(df: pd.DataFrame, name: str, col_obj: st
         cats.append(cat)
 
     # Crear DataFrame con todas las filas válidas
-    out = pd.DataFrame(valid_rows).copy()
-    out["col_objetivo"] = col_obj
-    out["col_actividad"] = col_act
-    out["score_obj_vs_act"] = scores
-    out["clasificacion_calculada"] = cats
+    if not valid_rows:
+        # Si no hay filas válidas, crear DataFrame vacío pero con columnas correctas
+        out = pd.DataFrame(columns=[col_obj, col_act, "col_objetivo", "col_actividad", "score_obj_vs_act", "clasificacion_calculada"])
+    else:
+        out = pd.DataFrame(valid_rows).copy()
+        out["col_objetivo"] = col_obj
+        out["col_actividad"] = col_act
+        out["score_obj_vs_act"] = scores
+        out["clasificacion_calculada"] = cats
     
-    counts = pd.Series(cats).value_counts(dropna=False).to_dict()
+    counts = pd.Series(cats).value_counts(dropna=False).to_dict() if cats else {}
     total = len(valid_rows)
     summary = {
         "Fuente": name,
         "Total actividades": total,
-        "Consistencia plena": int(counts.get("plena",0)),
-        "Consistencia parcial": int(counts.get("parcial",0)),
-        "Consistencia nula": int(counts.get("nula",0))
+        "Consistencia plena": int(counts.get("plena", 0)),
+        "Consistencia parcial": int(counts.get("parcial", 0)),
+        "Consistencia nula": int(counts.get("nula", 0))
     }
     return summary, out
 
@@ -214,16 +219,16 @@ def compute_consistency_pei_single(df: pd.DataFrame, name: str, col_act: str, pl
     for _, row in df.iterrows():
         activity_text = str(row.get(col_act, ""))
         
-        # Ultra-permisivo: procesar cualquier actividad con contenido
-        if not is_meaningful_text(activity_text, min_length=1):
+        # INCLUIR TODO, incluso "None"
+        if not is_meaningful_text(activity_text):
             continue
             
         valid_activities.append(row)
         text = normalize_text(activity_text)
         
-        # Si el texto normalizado está vacío, usar uno por defecto
+        # Si el texto normalizado está vacío, usar uno descriptivo
         if not text.strip():
-            text = "actividad educativa universitaria"
+            text = "actividad educativa universitaria plan"
             
         best, score = None, -1.0
         for entry in plan_index:
@@ -236,20 +241,23 @@ def compute_consistency_pei_single(df: pd.DataFrame, name: str, col_act: str, pl
         best_objs.append(best.get("objetivo") if best else None)
         best_specs.append(best.get("especifico") if best else None)
     
-    out = pd.DataFrame(valid_activities).copy()
-    out["pei_score"] = scores
-    out["clasificacion_calculada"] = cats
-    out["pei_objetivo"] = best_objs
-    out["pei_especifico"] = best_specs
+    if not valid_activities:
+        out = pd.DataFrame()
+    else:
+        out = pd.DataFrame(valid_activities).copy()
+        out["pei_score"] = scores
+        out["clasificacion_calculada"] = cats
+        out["pei_objetivo"] = best_objs
+        out["pei_especifico"] = best_specs
 
-    counts = pd.Series(cats).value_counts(dropna=False).to_dict()
+    counts = pd.Series(cats).value_counts(dropna=False).to_dict() if cats else {}
     total = len(valid_activities)
     summary = {
         "Fuente": name,
         "Total actividades": total,
-        "Consistencia plena": int(counts.get("plena",0)),
-        "Consistencia parcial": int(counts.get("parcial",0)),
-        "Consistencia nula": int(counts.get("nula",0))
+        "Consistencia plena": int(counts.get("plena", 0)),
+        "Consistencia parcial": int(counts.get("parcial", 0)),
+        "Consistencia nula": int(counts.get("nula", 0))
     }
     return summary, out
 
