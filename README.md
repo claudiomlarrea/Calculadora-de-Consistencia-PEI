@@ -1,19 +1,21 @@
-# Calculadora de Consistencia PEI – UCCuyo 2023–2027 (con correlación por PDF)
 
-Cruza las **actividades** con el **PEI oficial** (PDF) y clasifica cada actividad como **Plena / Parcial / Nula** de forma **conservadora**.
+# Calculadora de Consistencia – Formulario Único
 
-## Uso
-1. Subí el **PDF del PEI**.  
-2. Subí los **6 archivos** (CSV/XLSX/XLS) —podés hacerlo en tandas.  
-3. Ajustá **umbrales**.  
-4. Descargá **Excel** (Resumen, Porcentajes, Matriz, Detalle) y **Word**.
+Genera un Excel con **resumen, porcentajes, rendimiento por objetivo, duplicadas, detalle** y **sugerencias** por actividad:
+- **Mejor objetivo propuesto**
+- **Actividad (seleccionada)**
+- **% si se ubica en objetivo propuesto**
+- **Δ p.p.** respecto al objetivo actual
 
-## Local
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+## Uso (Streamlit Cloud)
+1. En GitHub (raíz): `app.py`, `utils.py`, `requirements.txt`, `runtime.txt` (3.11.9).
+2. En Streamlit Cloud:
+   - Main file path: `app.py`
+   - Python: 3.11 (deja `runtime.txt`)
+   - Restart y luego Clear cache
 
-## Cloud
-En GitHub (raíz): `app.py`, `utils.py`, `requirements.txt`, `runtime.txt` (3.11.9).  
-En Streamlit Cloud seleccioná **Python 3.11** o dejá `runtime.txt`.
+## En la app
+1. Subí el **Formulario Único** (XLSX/CSV).
+2. Elegí columnas **Objetivo específico** y **Actividad**.
+3. Ajustá umbrales y corré el análisis.
+4. Descargá el Excel.
