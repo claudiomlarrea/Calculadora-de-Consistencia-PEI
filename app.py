@@ -22,12 +22,16 @@ st.title("Análisis Avanzado de Consistencia - Formulario Único PEI")
 # ==================== FUNCIONES AUXILIARES ====================
 
 def count_all_activities(df: pd.DataFrame, col_act: str) -> int:
-    """Cuenta todas las actividades con cualquier contenido"""
-    return int(df[col_act].apply(lambda x: is_meaningful_text(x, min_length=1)).sum())
+    """Cuenta TODAS las actividades con cualquier contenido (ultra-inclusivo)"""
+    return int(df[col_act].apply(lambda x: is_meaningful_text(x)).sum())
 
 def count_with_objective(df: pd.DataFrame, col_obj: str) -> int:
     """Cuenta filas con objetivo asignado"""
-    return int(df[col_obj].apply(lambda x: is_meaningful_text(x, min_length=1)).sum())
+    return int(df[col_obj].apply(lambda x: is_meaningful_text(x)).sum())
+
+def count_truly_empty(df: pd.DataFrame, col_act: str) -> int:
+    """Cuenta solo las actividades verdaderamente vacías (NaN o cadena vacía)"""
+    return int(df[col_act].apply(lambda x: pd.isna(x) or str(x).strip() == "").sum())
 
 # ==================== FUNCIONES DE ANÁLISIS AVANZADO ====================
 
@@ -37,12 +41,11 @@ def generate_advanced_report(df: pd.DataFrame, col_obj: str, col_act: str,
     """Genera un informe avanzado similar al documento de conclusiones"""
     report = {}
     
-    # 1. Estadísticas generales
-    valid_activities = df[df[col_act].apply(lambda x: is_meaningful_text(x, min_length=1))]
+    # 1. Estadísticas generales (ahora incluye todo)
+    valid_activities = df[df[col_act].apply(lambda x: is_meaningful_text(x))]
     total_activities = len(valid_activities)
     
     if total_activities == 0:
-        # Retornar reporte vacío si no hay datos
         return {
             'estadisticas_generales': {'total_actividades': 0, 'promedio_consistencia': 0, 'mediana': 0, 'p25': 0, 'p75': 0, 'minimo': 0, 'maximo': 0},
             'distribucion_niveles': {'alta_75_plus': 0, 'media_50_74': 0, 'baja_menor_50': 0},
@@ -78,13 +81,14 @@ def generate_advanced_report(df: pd.DataFrame, col_obj: str, col_act: str,
     missing_objectives = analyze_missing_objectives(df, col_obj, col_act)
     report['sin_objetivo'] = missing_objectives
     
-    # 4. Otros análisis (simplificados para evitar errores)
-    report['rendimiento_objetivos'] = pd.DataFrame()
-    report['dispersion_objetivos'] = pd.DataFrame()
-    report['potencial_mejora'] = pd.DataFrame()
+    # 4. Actividades duplicadas o similares
     report['duplicados'] = find_duplicate_activities(valid_activities, col_act)
     
-    # 5. Recomendaciones
+    # 5. Análisis de tipos de contenido
+    content_analysis = analyze_content_types(valid_activities, col_act)
+    report['tipos_contenido'] = content_analysis
+    
+    # 6. Recomendaciones
     recommendations = generate_recommendations(report)
     report['recomendaciones'] = recommendations
     
@@ -93,14 +97,38 @@ def generate_advanced_report(df: pd.DataFrame, col_obj: str, col_act: str,
 def analyze_missing_objectives(df: pd.DataFrame, col_obj: str, col_act: str) -> Dict[str, Any]:
     """Analiza actividades sin objetivo asignado"""
     
-    missing_obj = df[df[col_obj].apply(lambda x: not is_meaningful_text(x, min_length=1)) & 
-                     df[col_act].apply(lambda x: is_meaningful_text(x, min_length=1))]
+    missing_obj = df[~df[col_obj].apply(lambda x: is_meaningful_text(x)) & 
+                     df[col_act].apply(lambda x: is_meaningful_text(x))]
     
     return {
         'total_sin_objetivo': len(missing_obj),
         'porcentaje_sin_objetivo': round(len(missing_obj) / len(df) * 100, 1) if len(df) > 0 else 0,
         'ejemplos': missing_obj[col_act].head(5).tolist() if len(missing_obj) > 0 else []
     }
+
+def analyze_content_types(df: pd.DataFrame, col_act: str) -> Dict[str, Any]:
+    """Analiza los tipos de contenido en las actividades"""
+    
+    content_types = {
+        'none_values': 0,
+        'descriptive_text': 0,
+        'short_phrases': 0,
+        'single_words': 0
+    }
+    
+    for _, row in df.iterrows():
+        activity = str(row[col_act]).strip()
+        
+        if activity.lower() in ['none', 'null', 'n/a', 'na']:
+            content_types['none_values'] += 1
+        elif len(activity.split()) >= 3:
+            content_types['descriptive_text'] += 1
+        elif len(activity.split()) == 2:
+            content_types['short_phrases'] += 1
+        else:
+            content_types['single_words'] += 1
+    
+    return content_types
 
 def find_duplicate_activities(df: pd.DataFrame, col_act: str, threshold: float = 85.0) -> pd.DataFrame:
     """Encuentra actividades duplicadas o muy similares"""
@@ -116,20 +144,21 @@ def find_duplicate_activities(df: pd.DataFrame, col_act: str, threshold: float =
         processed = set()
         
         for i, (act1, norm1) in enumerate(zip(activities, normalized_activities)):
-            if i in processed or not norm1:
+            if i in processed:
                 continue
                 
             similar_group = [act1]
             processed.add(i)
             
             for j, (act2, norm2) in enumerate(zip(activities, normalized_activities)):
-                if i >= j or j in processed or not norm2:
+                if i >= j or j in processed:
                     continue
                     
-                similarity = fuzz.token_set_ratio(norm1, norm2)
-                if similarity >= threshold:
-                    similar_group.append(act2)
-                    processed.add(j)
+                if norm1 and norm2:  # Solo comparar si ambos tienen contenido normalizado
+                    similarity = fuzz.token_set_ratio(norm1, norm2)
+                    if similarity >= threshold:
+                        similar_group.append(act2)
+                        processed.add(j)
             
             if len(similar_group) > 1:
                 representative = similar_group[0][:50] + "..." if len(similar_group[0]) > 50 else similar_group[0]
@@ -156,14 +185,17 @@ def generate_recommendations(report: Dict[str, Any]) -> Dict[str, List[str]]:
     stats = report['estadisticas_generales']
     duplicates = report['duplicados']
     sin_objetivo = report['sin_objetivo']
+    tipos = report.get('tipos_contenido', {})
     
     # Recomendaciones de corto plazo
     if stats['promedio_consistencia'] < 30:
         recommendations['corto_plazo'].append(
             "Implementar higiene de redacción con plantillas estandarizadas para actividades"
         )
+    
+    if tipos.get('none_values', 0) > 0:
         recommendations['corto_plazo'].append(
-            "Crear glosario de verbos operativos y entregables específicos"
+            f"Completar información para {tipos['none_values']} actividades marcadas como 'None'"
         )
     
     if not duplicates.empty:
@@ -181,9 +213,10 @@ def generate_recommendations(report: Dict[str, Any]) -> Dict[str, List[str]]:
         "Establecer trazabilidad KPI/evidencias para cada objetivo específico"
     )
     
-    recommendations['mediano_plazo'].append(
-        "Revisar y reencuadrar objetivos específicos con baja consistencia"
-    )
+    if tipos.get('short_phrases', 0) + tipos.get('single_words', 0) > 10:
+        recommendations['mediano_plazo'].append(
+            "Expandir descripciones de actividades que son demasiado breves o genéricas"
+        )
     
     # Recomendaciones de largo plazo
     recommendations['largo_plazo'].append(
@@ -201,6 +234,7 @@ def format_report_for_display(report: Dict[str, Any]) -> str:
     stats = report['estadisticas_generales']
     dist = report['distribucion_niveles']
     sin_obj = report['sin_objetivo']
+    tipos = report.get('tipos_contenido', {})
     
     formatted = f"""
 # Informe Avanzado de Consistencia PEI
@@ -216,6 +250,12 @@ def format_report_for_display(report: Dict[str, Any]) -> str:
 - **Media (50-74%)**: {dist['media_50_74']} actividades  
 - **Baja (<50%)**: {dist['baja_menor_50']} actividades
 
+## Análisis de Contenido
+- **Texto descriptivo**: {tipos.get('descriptive_text', 0)} actividades
+- **Frases cortas**: {tipos.get('short_phrases', 0)} actividades
+- **Palabras sueltas**: {tipos.get('single_words', 0)} actividades
+- **Valores 'None'**: {tipos.get('none_values', 0)} actividades
+
 ## Actividades sin Objetivo Asignado
 - **Total sin objetivo**: {sin_obj['total_sin_objetivo']} actividades ({sin_obj['porcentaje_sin_objetivo']}%)
 
@@ -224,8 +264,8 @@ def format_report_for_display(report: Dict[str, Any]) -> str:
     if dist['baja_menor_50'] > dist['alta_75_plus'] + dist['media_50_74']:
         formatted += "⚠️ **Interpretación**: Alta concentración en nivel Bajo sugiere redacciones genéricas u objetivos poco acotados.\n\n"
     
-    if sin_obj['total_sin_objetivo'] > 20:
-        formatted += "⚠️ **Atención**: Alto número de actividades sin objetivo específico asignado.\n\n"
+    if tipos.get('none_values', 0) > 50:
+        formatted += "⚠️ **Atención**: Alto número de actividades marcadas como 'None' - requieren completar información.\n\n"
     
     return formatted
 
@@ -261,74 +301,68 @@ with c2:
     col_act = st.selectbox("Columna de **Actividad**", options=list(df.columns), 
                           index=(list(df.columns).index(act_default) if act_default in df.columns else (1 if len(df.columns)>1 else 0)))
 
-# DIAGNÓSTICOS DETALLADOS
-st.subheader("Diagnóstico Detallado de Datos")
+# DIAGNÓSTICOS ULTRA-INCLUSIVOS
+st.subheader("Diagnóstico Ultra-Inclusivo de Datos")
 
 total_meaningful = count_all_activities(df, col_act)
 total_with_obj = count_with_objective(df, col_obj)
 total_both = count_valid_pairs(df, col_obj, col_act)
+total_truly_empty = count_truly_empty(df, col_act)
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric("Filas Originales", df_original_size)
 with col2:
-    st.metric("Actividades Válidas", total_meaningful)
+    st.metric("Actividades Válidas", total_meaningful, f"{total_meaningful/df_original_size*100:.1f}%")
 with col3:
     st.metric("Con Objetivo", total_with_obj)
 with col4:
-    st.metric("Completas", total_both)
+    st.metric("Verdaderamente Vacías", total_truly_empty)
 
-# Análisis detallado de lo que se considera válido/inválido
-st.write("### Análisis de Validez por Tipo")
+# Mostrar criterio inclusivo
+st.info(f"""
+🎯 **Criterio Ultra-Inclusivo**: Se consideran VÁLIDAS todas las actividades excepto las verdaderamente vacías.
+- ✅ **Incluye**: "None", "null", "-", números, texto descriptivo, frases cortas
+- ❌ **Excluye solo**: valores pandas NaN y celdas completamente vacías ("")
+""")
 
-# Mostrar ejemplos de cada categoría
+# Análisis de tipos de contenido
+st.write("### Análisis de Tipos de Contenido")
+
 col1, col2 = st.columns(2)
 
 with col1:
-    st.write("**✅ Actividades Válidas (se analizan):**")
-    valid_activities = df[df[col_act].apply(lambda x: is_meaningful_text(x, min_length=1))]
+    st.write("**✅ Actividades que se ANALIZAN:**")
+    valid_activities = df[df[col_act].apply(lambda x: is_meaningful_text(x))]
     if not valid_activities.empty:
         st.write(f"Total: {len(valid_activities)} actividades")
-        st.dataframe(valid_activities[[col_act]].head(5), use_container_width=True)
-    
-    # Mostrar actividades SIN objetivo
-    st.write("**⚠️ Actividades sin Objetivo (se analizan con objetivo genérico):**")
-    without_obj = valid_activities[~valid_activities[col_obj].apply(lambda x: is_meaningful_text(x, min_length=1))]
-    if not without_obj.empty:
-        st.write(f"Total: {len(without_obj)} actividades")
-        st.dataframe(without_obj[[col_act]].head(3), use_container_width=True)
-    else:
-        st.success("Todas las actividades válidas tienen objetivo asignado")
+        
+        # Mostrar diferentes tipos
+        none_activities = valid_activities[valid_activities[col_act].astype(str).str.lower().isin(['none', 'null', 'n/a'])]
+        descriptive_activities = valid_activities[valid_activities[col_act].astype(str).str.split().str.len() >= 3]
+        
+        st.write(f"- Texto descriptivo: {len(descriptive_activities)} actividades")
+        st.write(f"- Valores 'None'/similares: {len(none_activities)} actividades")
+        
+        # Mostrar ejemplos
+        st.dataframe(valid_activities[[col_act]].head(8), use_container_width=True)
 
 with col2:
-    st.write("**❌ Actividades Inválidas (se excluyen):**")
-    invalid_activities = df[~df[col_act].apply(lambda x: is_meaningful_text(x, min_length=1))]
+    st.write("**❌ Actividades EXCLUIDAS del análisis:**")
+    invalid_activities = df[~df[col_act].apply(lambda x: is_meaningful_text(x))]
     if not invalid_activities.empty:
-        st.write(f"Total: {len(invalid_activities)} registros excluidos")
-        st.write("**Motivos de exclusión:**")
-        
-        # Análisis de por qué se excluyen
-        exclusion_reasons = []
-        for _, row in invalid_activities.head(10).iterrows():
-            activity_val = row[col_act]
-            if pd.isna(activity_val):
-                exclusion_reasons.append("Valor nulo/NaN")
-            elif str(activity_val).strip().lower() in ["none", "nan", "null", "", "-"]:
-                exclusion_reasons.append(f"Valor vacío: '{activity_val}'")
-            else:
-                exclusion_reasons.append(f"Otro: '{str(activity_val)[:30]}...'")
-        
-        for reason in set(exclusion_reasons):
-            count = exclusion_reasons.count(reason)
-            st.write(f"- {reason}: {count} casos")
-            
+        st.write(f"Total: {len(invalid_activities)} registros ({len(invalid_activities)/df_original_size*100:.1f}%)")
+        st.write("**Solo se excluyen:**")
+        st.write("- Valores pandas NaN (nulos verdaderos)")
+        st.write("- Celdas completamente vacías")
         st.dataframe(invalid_activities[[col_act]].head(3), use_container_width=True)
     else:
-        st.success("Todas las filas contienen actividades válidas")
+        st.success("✅ Todas las filas se procesan (criterio ultra-inclusivo)")
 
-if total_meaningful != df_original_size:
-    excluded_count = df_original_size - total_meaningful
-    st.warning(f"⚠️ Se excluyeron {excluded_count} registros ({excluded_count/df_original_size*100:.1f}%) por no tener contenido válido en la columna de actividades.")
+# Actividades sin objetivo
+without_obj = valid_activities[~valid_activities[col_obj].apply(lambda x: is_meaningful_text(x))]
+if not without_obj.empty:
+    st.warning(f"⚠️ {len(without_obj)} actividades sin objetivo se analizarán usando objetivo genérico")
 
 st.subheader("Previsualización")
 st.dataframe(df[[col_obj, col_act]].head(12), use_container_width=True)
@@ -343,9 +377,12 @@ with c2:
 thr = {"plena": float(t_plena), "parcial": float(t_parcial)}
 
 # Análisis de consistencia
-if st.button("Realizar Análisis Avanzado", type="primary"):
-    with st.spinner("Calculando consistencias..."):
+if st.button("Realizar Análisis Ultra-Inclusivo", type="primary"):
+    with st.spinner("Calculando consistencias para TODAS las actividades..."):
         sum_indep, det_indep = compute_pairwise_consistency_single(df, uploaded.name, col_obj, col_act, thr)
+        
+        # Verificar que realmente se procesaron más actividades
+        st.success(f"✅ Procesadas {sum_indep['Total actividades']} actividades de {df_original_size} originales")
         
         # Generar análisis avanzado
         advanced_report = generate_advanced_report(det_indep, col_obj, col_act)
@@ -398,6 +435,7 @@ if st.button("Realizar Análisis Avanzado", type="primary"):
         blocks = [
             ("Resumen_Estadisticas", pd.DataFrame([advanced_report['estadisticas_generales']])),
             ("Distribucion_Niveles", pd.DataFrame([advanced_report['distribucion_niveles']])),
+            ("Tipos_Contenido", pd.DataFrame([advanced_report['tipos_contenido']])),
             ("Sin_Objetivo", pd.DataFrame([advanced_report['sin_objetivo']])),
             ("Actividades_Duplicadas", advanced_report['duplicados']),
             ("Detalle_Completo", det_indep),
@@ -407,9 +445,9 @@ if st.button("Realizar Análisis Avanzado", type="primary"):
         excel_bytes = excel_from_blocks(blocks)
         
         st.download_button(
-            "Descargar Análisis Excel Completo", 
+            "Descargar Análisis Excel Ultra-Inclusivo", 
             data=excel_bytes, 
-            file_name=f"analisis_consistencia_avanzado_{ts}.xlsx", 
+            file_name=f"analisis_consistencia_ultra_inclusivo_{ts}.xlsx", 
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
