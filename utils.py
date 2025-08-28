@@ -2,16 +2,16 @@
 from io import BytesIO
 import re
 import unicodedata
-from typing import List, Dict, Any, Tuple, Optional
+from typing import Dict, Any
 import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz
 
-# Evitar ImportError si no está pypdf instalado (no siempre usamos PDF)
+# PDF reader opcional (no rompe si falta)
 try:
     from pypdf import PdfReader  # type: ignore
-except Exception:  # pragma: no cover
-    PdfReader = None  # se maneja dentro de la función
+except Exception:
+    PdfReader = None
 
 # -------------------- Normalización --------------------
 EMPTY_TOKENS = {"", "nan", "none", "-", "—", "–"}
@@ -91,15 +91,19 @@ def best_alt_objective(activity_norm: str, current_obj: str, unique_objs_norm):
 
 def analyze_independent(df: pd.DataFrame, name: str, col_obj: str, col_act: str, thr_full=88.0, thr_partial=68.0):
     """Devuelve:
-       - resumen (dict)
+       - resumen (dict) con totales y consistencia
        - detalle (DataFrame) con columnas extra pedidas
-       - perf_obj (DataFrame rendimiento por objetivo)
+       - cons_obj (DataFrame consistencia por objetivo)
        - mejoras (DataFrame sugerencias con Δ p.p. >= 15)
        - duplicadas (DataFrame sospecha de duplicados)
     """
     df = clean_rows(df.copy())
+    total_filas = len(df)
+
     valid_mask = (~df[col_obj].apply(is_empty_value)) & (~df[col_act].apply(is_empty_value))
     data = df.loc[valid_mask].reset_index(drop=True).copy()
+    con_detalle = len(data)
+    sin_detalle = int(total_filas - con_detalle)
 
     # normalizados
     data["_obj_norm"] = data[col_obj].astype(str).map(normalize_text)
@@ -123,30 +127,33 @@ def analyze_independent(df: pd.DataFrame, name: str, col_obj: str, col_act: str,
     data["% si se ubica en objetivo propuesto"] = [round(x,1) for x in alt_scores]
 
     # info de situación actual
-    data["score_obj_vs_act"] = scores
+    data["% actual (objetivo↔actividad)"] = [round(x,1) for x in scores]
     data["clasificacion"] = cats
     data["Δ p.p. (objetivo propuesto - actual)"] = [round(x,1) for x in deltas]
 
     # Resumen
     counts = data["clasificacion"].value_counts(dropna=False).to_dict()
-    total = len(data)
+    total_validas = len(data)
     resumen = {
         "Fuente": name,
-        "Total actividades": int(total),
+        "Total participantes": int(total_filas),
+        "Con detalle": int(con_detalle),
+        "Sin detalle": int(sin_detalle),
+        "Total actividades (evaluadas)": int(total_validas),
         "Consistencia plena": int(counts.get("plena",0)),
         "Consistencia parcial": int(counts.get("parcial",0)),
         "Consistencia nula": int(counts.get("nula",0))
     }
 
-    # Rendimiento por objetivo
-    g = data.groupby(col_obj)["score_obj_vs_act"].agg(["count","mean","median"])
-    g["p25"] = data.groupby(col_obj)["score_obj_vs_act"].quantile(0.25)
-    g["p75"] = data.groupby(col_obj)["score_obj_vs_act"].quantile(0.75)
-    g["std"] = data.groupby(col_obj)["score_obj_vs_act"].std(ddof=0)
-    lvl = data.assign(_low = data["clasificacion"].eq("nula")).groupby(col_obj)["_low"].mean().rename("% en Bajo")
-    perf_obj = g.join(lvl).reset_index().rename(columns={col_obj:"Objetivo específico","count":"N","mean":"Promedio","median":"Mediana"})
-    perf_obj["% en Bajo"] = (perf_obj["% en Bajo"]*100).round(1)
-    perf_obj = perf_obj.sort_values("% en Bajo", ascending=False)
+    # Consistencia por objetivo
+    g = data.groupby(col_obj)["% actual (objetivo↔actividad)"].agg(["count","mean","median"])
+    g["p25"] = data.groupby(col_obj)["% actual (objetivo↔actividad)"].quantile(0.25)
+    g["p75"] = data.groupby(col_obj)["% actual (objetivo↔actividad)"].quantile(0.75)
+    g["std"] = data.groupby(col_obj)["% actual (objetivo↔actividad)"].std(ddof=0)
+    low = data.assign(_low = data["clasificacion"].eq("nula")).groupby(col_obj)["_low"].mean().rename("% en Bajo")
+    cons_obj = g.join(low).reset_index().rename(columns={col_obj:"Objetivo específico","count":"N","mean":"Promedio","median":"Mediana"})
+    cons_obj["% en Bajo"] = (cons_obj["% en Bajo"]*100).round(1)
+    cons_obj = cons_obj.sort_values("% en Bajo", ascending=False)
 
     # Potencial de reubicación (ganancia >= 15 p.p.)
     mejoras = data.copy()
@@ -154,14 +161,14 @@ def analyze_independent(df: pd.DataFrame, name: str, col_obj: str, col_act: str,
     mejoras = mejoras[[
         "Actividad (seleccionada)",  # actividad
         col_obj,                      # objetivo actual
-        "score_obj_vs_act",           # % actual
+        "% actual (objetivo↔actividad)",  # % actual
         "Mejor objetivo propuesto",   # objetivo sugerido
         "% si se ubica en objetivo propuesto",  # % sugerido
         "Δ p.p. (objetivo propuesto - actual)"
     ]].rename(columns={
         "Actividad (seleccionada)":"Actividad",
         col_obj:"Obj. actual",
-        "score_obj_vs_act":"% actual",
+        "% actual (objetivo↔actividad)":"% actual",
         "Mejor objetivo propuesto":"Obj. sugerido",
         "% si se ubica en objetivo propuesto":"% sugerido",
         "Δ p.p. (objetivo propuesto - actual)":"Δ p.p."
@@ -176,73 +183,125 @@ def analyze_independent(df: pd.DataFrame, name: str, col_obj: str, col_act: str,
     dup = dup.loc[dup["Repeticiones"]>1].sort_values("Repeticiones", ascending=False)
     dup = dup.rename(columns={"act_norm":"Actividad (normalizada)"})
 
-    return resumen, data, perf_obj, mejoras, dup
+    return resumen, data, cons_obj, mejoras, dup
 
 # -------------------- Exportadores --------------------
 def excel_consolidado(resumen: Dict[str,int], detalle: pd.DataFrame,
-                      perf_obj: pd.DataFrame, mejoras: pd.DataFrame, duplicadas: pd.DataFrame):
-    """Excel tipo 'informe_consistencia_pei_consolidado' con columnas pedidas."""
+                      cons_obj: pd.DataFrame, mejoras: pd.DataFrame, duplicadas: pd.DataFrame):
+    """Excel con Consistencia (no 'Rendimiento')."""
     from pandas import ExcelWriter
     bio = BytesIO()
     with ExcelWriter(bio, engine="openpyxl") as writer:
+        # Resumen
         pd.DataFrame([resumen]).to_excel(writer, index=False, sheet_name="Resumen")
+        # Porcentajes
+        T = max(resumen.get("Total actividades (evaluadas)", 0), 1)
         p = pd.DataFrame([{
-            "Fuente": resumen["Fuente"],
-            "% Consistencia plena": round(resumen["Consistencia plena"]/max(resumen["Total actividades"],1),4),
-            "% Consistencia parcial": round(resumen["Consistencia parcial"]/max(resumen["Total actividades"],1),4),
-            "% Consistencia nula": round(resumen["Consistencia nula"]/max(resumen["Total actividades"],1),4),
+            "Fuente": resumen.get("Fuente",""),
+            "% Consistencia plena": round(resumen.get("Consistencia plena",0)/T,4),
+            "% Consistencia parcial": round(resumen.get("Consistencia parcial",0)/T,4),
+            "% Consistencia nula": round(resumen.get("Consistencia nula",0)/T,4),
         }])
         p.to_excel(writer, index=False, sheet_name="Porcentajes")
-        perf_obj.to_excel(writer, index=False, sheet_name="Rendimiento_por_objetivo")
+        # Consistencia por objetivo (nuevo nombre)
+        cons_obj.to_excel(writer, index=False, sheet_name="Consistencia_por_objetivo")
         mejoras.to_excel(writer, index=False, sheet_name="Potencial_reubicacion")
         duplicadas.to_excel(writer, index=False, sheet_name="Duplicadas")
-        # Detalle incluye las nuevas 3 columnas pedidas
         detalle.to_excel(writer, index=False, sheet_name="Detalle")
     bio.seek(0)
     return bio.getvalue()
 
-# -------------------- (Opcional) Parseo PEI PDF seguro --------------------
-def parse_pei_pdf(file_like) -> Dict[str, Any]:
-    if PdfReader is None:
-        # Si no hay pypdf instalado devolvemos índice vacío y evitamos romper import
-        return {}
-    reader = PdfReader(file_like)
-    text = "\n".join(page.extract_text() or "" for page in reader.pages)
-    text_norm = strip_accents(text)
-    lines = [l.strip() for l in text_norm.splitlines() if l.strip()]
-    obj_map: Dict[str, Dict[str, Any]] = {}
-    current_obj = None
-    current_spec = None
-    mode = None
-    re_obj = re.compile(r"^OBJETIVO\s+(\d)\s*[:\-]?", re.IGNORECASE)
-    re_spec = re.compile(r"^(\d\.\d)\.?")
-    for raw in lines:
-        l = raw
-        m = re_obj.search(l)
-        if m:
-            current_obj = m.group(1)
-            obj_map.setdefault(current_obj, {"titulo": "", "especificos": {}})
-            current_spec = None
-            mode = None
-            continue
-        m2 = re_spec.match(l)
-        if m2 and current_obj:
-            current_spec = m2.group(1)
-            obj_map[current_obj]["especificos"].setdefault(current_spec, {"titulo": l, "acciones": [], "indicadores": []})
-            mode = None
-            continue
-        if current_obj and current_spec:
-            low = l.lower()
-            if "acciones" == low.strip():
-                mode = "acciones"; continue
-            if "indicadores" == low.strip():
-                mode = "indicadores"; continue
-            if low.startswith("responsable") or low.startswith("plazos"):
-                mode = None; continue
-            if mode == "acciones":
-                if re.match(r"^\d+\.\d+\.\d+\.", l) or low.startswith("-") or low.startswith("\u2212"):
-                    obj_map[current_obj]["especificos"][current_spec]["acciones"].append(l)
-            elif mode == "indicadores":
-                if not re.match(r"^OBJETIVO", l, re.IGNORECASE) and not re_spec.match(l):
-                    obj_map[current_obj]["especificos"][current_spec]["indicadores"].append(l)
-    return obj_map
+def docx_conclusiones(resumen: Dict[str,int], detalle: pd.DataFrame, cons_obj: pd.DataFrame, mejoras: pd.DataFrame):
+    """Diagnóstico Completo del Formulario (Word)."""
+    try:
+        from docx import Document
+        from docx.shared import Pt
+    except Exception:
+        return None
+
+    def pct(a,b): return 0 if b==0 else round(100*a/b,1)
+
+    # Métricas globales
+    scores = detalle["% actual (objetivo↔actividad)"] if not detalle.empty else pd.Series(dtype=float)
+    mean = round(float(scores.mean()) if len(scores) else 0,1)
+    med  = round(float(scores.median()) if len(scores) else 0,1)
+    p25  = round(float(scores.quantile(0.25)) if len(scores) else 0,1)
+    p75  = round(float(scores.quantile(0.75)) if len(scores) else 0,1)
+    rng_min = round(float(scores.min()) if len(scores) else 0,1)
+    rng_max = round(float(scores.max()) if len(scores) else 0,1)
+
+    T_part = int(resumen.get("Total participantes",0))
+    con_det = int(resumen.get("Con detalle",0))
+    sin_det = int(resumen.get("Sin detalle",0))
+    T_eval = int(resumen.get("Total actividades (evaluadas)",0))
+    P = int(resumen.get("Consistencia plena",0))
+    Pa = int(resumen.get("Consistencia parcial",0))
+    N = int(resumen.get("Consistencia nula",0))
+
+    doc = Document()
+    style = doc.styles["Normal"]; style.font.name = "Times New Roman"; style.font.size = Pt(11)
+    doc.add_heading("Diagnóstico Completo del Formulario", level=1)
+
+    # Totales
+    doc.add_paragraph(f"Total Participantes {T_part}")
+    doc.add_paragraph(f"Con Detalle {con_det}")
+    doc.add_paragraph(f"Sin Detalle {sin_det}")
+    doc.add_paragraph(f"Total Actividades completas {T_eval}")
+
+    doc.add_heading("Resumen de Participación", level=2)
+    doc.add_paragraph(f"Total participantes: {T_part} actividades")
+    doc.add_paragraph(f"Actividades con detalle: {con_det} actividades ({pct(con_det, T_part)}%)")
+    doc.add_paragraph(f"Sin detalle: {sin_det} actividades")
+
+    doc.add_heading("Estadísticas de Actividades", level=2)
+    doc.add_paragraph(f"Total actividades completas propuestas: {T_eval}")
+    doc.add_paragraph(f"Promedio de consistencia: {mean}%")
+    doc.add_paragraph(f"Mediana: {med}% | P25: {p25}% | P75: {p75}%")
+    doc.add_paragraph(f"Rango: {rng_min}% - {rng_max}%")
+
+    doc.add_heading("Distribución por Niveles de Consistencia", level=2)
+    table = doc.add_table(rows=1, cols=3)
+    hdr = table.rows[0].cells
+    hdr[0].text = "Nivel"; hdr[1].text = "N actividades"; hdr[2].text = "Porcentaje"
+    rows = [("Alta (≥75%)", P, pct(P,T_eval)), ("Media (50–74%)", Pa, pct(Pa,T_eval)), ("Baja (<50%)", N, pct(N,T_eval))]
+    for r in rows:
+        cells = table.add_row().cells
+        cells[0].text, cells[1].text, cells[2].text = str(r[0]), str(r[1]), f"{r[2]}%"
+
+    # Top 10 objetivos más críticos por % en Bajo
+    if not cons_obj.empty:
+        doc.add_heading("Consistencia por Objetivo específico (Top 10 críticos)", level=2)
+        top = cons_obj.sort_values("% en Bajo", ascending=False).head(10)
+        t = doc.add_table(rows=1, cols=5)
+        t.rows[0].cells[0].text = "Objetivo específico"
+        t.rows[0].cells[1].text = "N"
+        t.rows[0].cells[2].text = "Promedio"
+        t.rows[0].cells[3].text = "Mediana"
+        t.rows[0].cells[4].text = "% en Bajo"
+        for _, r in top.iterrows():
+            cells = t.add_row().cells
+            cells[0].text = str(r["Objetivo específico"]); cells[1].text = str(int(r["N"]))
+            cells[2].text = f"{round(float(r['Promedio']),1)}%"; cells[3].text = f"{round(float(r['Mediana']),1)}%"; cells[4].text = f"{round(float(r['% en Bajo']),1)}%"
+
+    # Top 15 sugerencias
+    if not mejoras.empty:
+        doc.add_heading("Actividades con alto potencial de mejora/reubicación", level=2)
+        k = min(15, len(mejoras))
+        t = doc.add_table(rows=1, cols=6)
+        t.rows[0].cells[0].text = "Actividad"
+        t.rows[0].cells[1].text = "Obj. actual"
+        t.rows[0].cells[2].text = "% actual"
+        t.rows[0].cells[3].text = "Obj. sugerido"
+        t.rows[0].cells[4].text = "% sugerido"
+        t.rows[0].cells[5].text = "Δ p.p."
+        for _, r in mejoras.head(k).iterrows():
+            cells = t.add_row().cells
+            cells[0].text = str(r["Actividad"])
+            cells[1].text = str(r["Obj. actual"])
+            cells[2].text = f"{round(float(r['% actual']),1)}%"
+            cells[3].text = str(r["Obj. sugerido"])
+            cells[4].text = f"{round(float(r['% sugerido']),1)}%"
+            cells[5].text = f"{round(float(r['Δ p.p.']),1)}"
+
+    bio = BytesIO(); doc.save(bio); bio.seek(0)
+    return bio.getvalue()
