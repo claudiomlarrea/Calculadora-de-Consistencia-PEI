@@ -51,28 +51,31 @@ def clean_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df.dropna(how='all').reset_index(drop=True)
 
 def detect_all_objective_activity_pairs(df: pd.DataFrame) -> List[Tuple[str, str]]:
-    """Detecta TODOS los pares de columnas (objetivo, actividad) en el formulario"""
+    """Detecta TODOS los pares de columnas (objetivo específico, actividad) excluyendo detalles"""
     cols = list(df.columns)
     pairs = []
     
-    # Buscar patrones de objetivos específicos
+    # Patrones para objetivos específicos
     obj_patterns = [
         r"objetivos?\s+especific\w*\s*(\d+)",
-        r"objetivo\s+(\d+)",
-        r"obj\s+(\d+)",
+        r"objetivo\s+especific\w*\s*(\d+)",
         r"especific\w*\s+(\d+)"
     ]
     
-    # Buscar patrones de actividades
+    # Patrones para actividades (excluyendo "detalle")
     act_patterns = [
         r"actividad\w*\s+objetivo\s*(\d+)",
         r"actividad\w*\s+(\d+)",
-        r"accion\w*\s+(\d+)"
+        r"accion\w*\s+(\d+)",
+        r"actividades\s+totales\s+objetivo\s+(\d+)"
     ]
     
-    # Encontrar columnas de objetivos numeradas
+    # Encontrar columnas de objetivos específicos numeradas
     obj_cols = {}
     for col in cols:
+        # Excluir columnas que contengan "detalle"
+        if "detalle" in col.lower():
+            continue
         for pattern in obj_patterns:
             match = re.search(pattern, col, re.IGNORECASE)
             if match:
@@ -80,9 +83,12 @@ def detect_all_objective_activity_pairs(df: pd.DataFrame) -> List[Tuple[str, str
                 obj_cols[num] = col
                 break
     
-    # Encontrar columnas de actividades numeradas
+    # Encontrar columnas de actividades numeradas (sin detalle)
     act_cols = {}
     for col in cols:
+        # EXCLUIR explícitamente columnas de detalle
+        if "detalle" in col.lower():
+            continue
         for pattern in act_patterns:
             match = re.search(pattern, col, re.IGNORECASE)
             if match:
@@ -90,8 +96,20 @@ def detect_all_objective_activity_pairs(df: pd.DataFrame) -> List[Tuple[str, str
                 act_cols[num] = col
                 break
     
+    # También buscar patrones más generales para actividades
+    if not act_cols:
+        for col in cols:
+            if "detalle" in col.lower():
+                continue
+            if any(word in col.lower() for word in ["actividad", "accion"]):
+                # Extraer número si existe
+                num_match = re.search(r"(\d+)", col)
+                if num_match:
+                    num = num_match.group(1)
+                    act_cols[num] = col
+    
     # Emparejar por número
-    for num in obj_cols:
+    for num in sorted(obj_cols.keys()):
         if num in act_cols:
             pairs.append((obj_cols[num], act_cols[num]))
     
@@ -102,16 +120,27 @@ def detect_all_objective_activity_pairs(df: pd.DataFrame) -> List[Tuple[str, str
     return [p for p in pairs if p[0] and p[1]]
 
 def detect_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
-    """Detección simple de una columna objetivo y una actividad"""
+    """Detección simple de una columna objetivo y una actividad (excluyendo detalle)"""
     cols = list(df.columns)
+    
+    # Candidatos de objetivo (excluyendo detalle)
     obj_candidates = [c for c in cols if any(k in c for k in [
-        "objetivo especific", "objetivos especific", "objetivo espe", "objetivo 1", "obj 1", "especifico"
-    ])]
+        "objetivo especific", "objetivos especific", "objetivo espe", "especifico"
+    ]) and "detalle" not in c.lower()]
+    
+    # Candidatos de actividad (excluyendo detalle)  
     act_candidates = [c for c in cols if any(k in c for k in [
         "actividad", "actividades objetivo", "actividad objetivo", "accion", "acciones"
-    ])]
-    obj_col = obj_candidates[0] if obj_candidates else (cols[0] if cols else None)
-    act_candidates = [c for c in act_candidates if c != obj_col] or [c for c in cols if c != obj_col]
+    ]) and "detalle" not in c.lower()]
+    
+    obj_col = obj_candidates[0] if obj_candidates else None
+    
+    # Para actividad, preferir columnas distintas de obj y sin "detalle"
+    act_candidates = [c for c in act_candidates if c != obj_col] 
+    if not act_candidates:
+        # Buscar cualquier columna sin "detalle" que no sea obj
+        act_candidates = [c for c in cols if c != obj_col and "detalle" not in c.lower()]
+    
     act_col = act_candidates[0] if act_candidates else None
     return obj_col, act_col
 
