@@ -1,169 +1,102 @@
-import io
-import datetime as dt
-import pandas as pd
+
 import streamlit as st
-from pathlib import Path
+import pandas as pd
+import numpy as np
+import io
+import re
+import matplotlib.pyplot as plt
+from datetime import datetime
+
 from utils import (
-    normalize_colnames,
-    guess_consistency_column,
-    compute_consistency_summary,
-    build_excel_report,
-    build_word_report,
+    parse_uploaded_files,
+    build_all_acts_and_summaries,
+    build_excel_bytes,
+    build_word_bytes,
 )
 
-st.set_page_config(page_title="Calculadora de Consistencia PEI – UCCuyo 2023–2027", layout="wide")
+st.set_page_config(page_title="Calculadora Consistencia PEI UCCuyo", layout="wide")
 
-st.title("📊 Calculadora de Consistencia PEI – UCCuyo 2023–2027")
-st.caption("Secretaría de Investigación – UCCuyo")
+st.title("Calculadora de Consistencia con el PEI 2023–2027 (UCCuyo)")
+st.caption("Subí las 6 tablas de actividades (Objetivos 1 a 6). La app genera automáticamente el Excel y el Informe Word.")
 
-with st.expander("¿Cómo funciona?", expanded=False):
+with st.expander("Instrucciones de carga", expanded=True):
     st.markdown("""
-    - Podés subir los **6 archivos CSV** de una sola vez o en **varios pasos**.  
-    - El sistema detecta la columna de consistencia; si no, podés seleccionarla manualmente.  
-    - Genera un **Excel** (resumen + detalle) y un **Word** narrado.
+    - Subí **exactamente 6 archivos CSV**, uno por objetivo (1 a 6).
+    - No importa el orden ni el nombre del archivo; la calculadora detecta el objetivo **por las columnas** internas.
+    - Campos esperados por archivo: `AÑO`, `Objetivos específicos X`, `Actividades Objetivo X`, `Detalle de la Actividad Objetivo X`, `Unidad Académica o Administrativa` (con o sin espacios iniciales).
+    - Se ignoran filas sin actividad real (marcadores con “-”).
     """)
 
-if "file_bufs" not in st.session_state:
-    st.session_state.file_bufs = []
-    st.session_state.file_names = []
-
 uploaded = st.file_uploader(
-    "Subí 1 o más archivos CSV (hasta completar 6)",
-    type=["csv","xlsx","xls"],
+    "Arrastrá y soltá aquí los 6 CSV",
+    type=["csv"],
     accept_multiple_files=True,
-    help="Podés subirlos en tandas; cuando haya 6, se habilita el análisis."
+    help="Podés seleccionar múltiples archivos a la vez.",
 )
 
 if uploaded:
-    for f in uploaded:
-        # evitar duplicados por nombre
-        if f.name not in st.session_state.file_names:
-            st.session_state.file_bufs.append(f.getvalue())
-            st.session_state.file_names.append(f.name)
-    st.success(f"Se agregaron {len(uploaded)} archivo(s). Total acumulado: {len(st.session_state.file_names)}/6.")
-
-# Mostrar lista acumulada y permitir limpiar
-if st.session_state.file_names:
-    st.subheader("Archivos acumulados")
-    for i, n in enumerate(st.session_state.file_names, start=1):
-        st.write(f"{i}. {n}")
-    if st.button("🗑️ Limpiar lista"):
-        st.session_state.file_bufs = []
-        st.session_state.file_names = []
-        st.experimental_rerun()
-
-total = len(st.session_state.file_names)
-
-if total < 6:
-    st.info("Subí los archivos restantes hasta alcanzar **6** para habilitar el análisis.")
-    st.stop()
-
-# --- Procesamiento cuando hay 6 exactos ---
-if total > 6:
-    st.error("Hay más de 6 archivos. Usá el botón 'Limpiar lista' y volvé a subir exactamente 6.")
-    st.stop()
-
-# Reconstruir archivos como UploadedFile-like
-files = []
-for name, data in zip(st.session_state.file_names, st.session_state.file_bufs):
-    files.append(io.BytesIO(data)); files[-1].name = name  # tipo simple con atributo name
-
-
-dfs = []
-names = []
-for f in files:
-    name = f.name
-    suffix = Path(name).suffix.lower()
-    try:
-        if suffix in [".xlsx", ".xls"]:
-            f.seek(0)
-            df = pd.read_excel(f, engine="openpyxl")
-        else:
-            f.seek(0)
+    if len(uploaded) != 6:
+        st.warning("Se detectaron **{}** archivos. Subí **exactamente 6** (Objetivos 1 a 6).".format(len(uploaded)))
+    else:
+        with st.spinner("Procesando archivos…"):
             try:
-                df = pd.read_csv(f, encoding="utf-8", sep=None, engine="python")
-            except Exception:
-                f.seek(0)
-                df = pd.read_csv(f, encoding="latin-1", sep=None, engine="python")
-    except Exception as e:
-        st.error(f"❌ No pude leer '{name}'. Asegurate de que sea CSV/XLSX válido. Detalle: {e}")
-        st.stop()
-    df = normalize_colnames(df)
-    dfs.append(df)
-    names.append(Path(name).stem)
+                raw_by_obj = parse_uploaded_files(uploaded)  # dict {1..6: df}
+                if set(raw_by_obj.keys()) != set(range(1,7)):
+                    st.error("No se pudieron identificar todos los objetivos (1 a 6) a partir de las columnas. Verificá que cada CSV tenga las columnas estándar.")
+                else:
+                    all_acts, pivot_summary, pivot_counts, dist_codigo, top_codigos, unidades_desvio = build_all_acts_and_summaries(raw_by_obj)
 
-st.success("✅ Se recibieron 6 archivos correctamente.")
+                    st.success("¡Listo! Se analizaron {} actividades.".format(len(all_acts)))
 
-st.subheader("🧩 Configuración de consistencia")
-default_labels = dict(plena=["plena", "completa", "total"],
-                      parcial=["parcial", "media"],
-                      nula=["nula", "sin", "no corresponde", "desvío", "desvio", "ninguna"])
+                    # Vistas
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.subheader("Porcentaje por objetivo")
+                        st.dataframe(pivot_summary, use_container_width=True)
+                    with c2:
+                        st.subheader("Cantidades por objetivo")
+                        st.dataframe(pivot_counts, use_container_width=True)
 
-col_configs = []
-for i, (name, df) in enumerate(zip(names, dfs), start=1):
-    with st.expander(f"Archivo {i}: {name}", expanded=(i == 1)):
-        col_guess = guess_consistency_column(df)
-        selected_col = st.selectbox(
-            "Columna de consistencia",
-            options=["<ninguna>"] + list(df.columns),
-            index=(0 if col_guess is None else list(df.columns).index(col_guess) + 1),
-            key=f"col_{i}"
-        )
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            plena_input = st.text_input("Etiquetas para PLENA (coma-separadas)", ", ".join(default_labels["plena"]), key=f"pl_{i}")
-        with c2:
-            parcial_input = st.text_input("Etiquetas para PARCIAL (coma-separadas)", ", ".join(default_labels["parcial"]), key=f"pa_{i}")
-        with c3:
-            nula_input = st.text_input("Etiquetas para NULA (coma-separadas)", ", ".join(default_labels["nula"]), key=f"nu_{i}")
+                    # Gráfico
+                    st.subheader("Consistencia con PEI por Objetivo (%)")
+                    consistent = pivot_summary[["Objetivo", "Consistente con PEI (objetivo específico identificado)"]].copy()
+                    consistent = consistent.sort_values("Objetivo")
+                    fig, ax = plt.subplots(figsize=(6,4))
+                    ax.bar(consistent["Objetivo"].astype(int), consistent["Consistente con PEI (objetivo específico identificado)"])
+                    ax.set_xlabel("Objetivo")
+                    ax.set_ylabel("Porcentaje de actividades consistentes")
+                    ax.set_title("Consistencia con PEI por Objetivo (%)")
+                    st.pyplot(fig, clear_figure=True)
 
-        labels = {
-            "plena": [s.strip().lower() for s in plena_input.split(",") if s.strip()],
-            "parcial": [s.strip().lower() for s in parcial_input.split(",") if s.strip()],
-            "nula": [s.strip().lower() for s in nula_input.split(",") if s.strip()],
-        }
-        col_configs.append((selected_col if selected_col != "<ninguna>" else None, labels))
+                    st.subheader("Detalle de actividades (con % de consistencia por objetivo)")
+                    st.dataframe(all_acts, use_container_width=True)
 
-# Calcular resumen
-summary_rows = []
-detail_tables = []
-for name, df, (colname, labels) in zip(names, dfs, col_configs):
-    result = compute_consistency_summary(df, colname, labels)
-    result["objetivo"] = name
-    summary_rows.append({
-        "Objetivo (archivo)": name,
-        "Total actividades": result["total"],
-        "Consistencia plena": result["plena"],
-        "Consistencia parcial": result["parcial"],
-        "Consistencia nula": result["nula"],
-        "Sin clasificar": result["sin_clasificar"],
-    })
-    detail_tables.append((name, result["table"]))
+                    # Descargas
+                    xlsx_bytes = build_excel_bytes(all_acts, pivot_summary, pivot_counts, dist_codigo, top_codigos, unidades_desvio)
+                    st.download_button(
+                        label="⬇️ Descargar Excel (consistencia_por_objetivo.xlsx)",
+                        data=xlsx_bytes,
+                        file_name="consistencia_por_objetivo.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
 
-summary_df = pd.DataFrame(summary_rows)
-totals = summary_df[["Total actividades", "Consistencia plena", "Consistencia parcial", "Consistencia nula", "Sin clasificar"]].sum()
+                    docx_bytes = build_word_bytes(all_acts, pivot_summary, pivot_counts, dist_codigo, top_codigos, unidades_desvio, fig)
+                    st.download_button(
+                        label="⬇️ Descargar Informe Word (Informe_consistencia_PEI_UCCuyo.docx)",
+                        data=docx_bytes,
+                        file_name="Informe_consistencia_PEI_UCCuyo.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        use_container_width=True,
+                    )
 
-st.subheader("📊 Resumen")
-st.dataframe(summary_df, use_container_width=True)
-st.write("**Totales:**", {k:int(v) for k,v in totals.items()})
+                    with st.expander("Tablas auxiliares"):
+                        st.write("Top códigos por objetivo")
+                        st.dataframe(top_codigos, use_container_width=True)
+                        st.write("Unidades con mayor número de desvíos")
+                        st.dataframe(unidades_desvio, use_container_width=True)
 
-ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-excel_bytes = build_excel_report(summary_df, detail_tables)
-word_bytes = build_word_report(summary_df, totals, names)
-
-c1, c2 = st.columns(2)
-with c1:
-    st.download_button("⬇️ Descargar Excel (resumen + detalle)",
-                       data=excel_bytes,
-                       file_name=f"reporte_consolidado_{ts}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-with c2:
-    st.download_button("⬇️ Descargar Word (informe narrado)",
-                       data=word_bytes,
-                       file_name=f"informe_consolidado_{ts}.docx",
-                       mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-
-st.subheader("📄 Detalle por archivo")
-for name, table in detail_tables:
-    with st.expander(name, expanded=False):
-        st.dataframe(table, use_container_width=True)
+            except Exception as e:
+                st.exception(e)
+else:
+    st.info("Esperando que subas los 6 CSV…")
