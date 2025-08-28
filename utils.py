@@ -295,7 +295,15 @@ def compute_pairwise_consistency_single(df: pd.DataFrame, name: str, col_obj: st
         "Consistencia nula": int(counts.get("nula", 0))
     }
     
-    return summary, out
+# -------------------- Reportes --------------------
+def excel_from_blocks(blocks: List[Tuple[str, pd.DataFrame]]):
+    from pandas import ExcelWriter
+    bio = BytesIO()
+    with ExcelWriter(bio, engine="openpyxl") as writer:
+        for sheet, df in blocks:
+            df.to_excel(writer, index=False, sheet_name=sheet[:31])
+    bio.seek(0)
+    return bio.getvalue()
 
 # -------------------- PEI --------------------
 def parse_pei_pdf(file_like) -> Dict[str, Any]:
@@ -421,11 +429,66 @@ def compute_consistency_pei_single(df: pd.DataFrame, name: str, col_act: str, pl
     return summary, out
 
 # -------------------- Reportes --------------------
-def excel_from_blocks(blocks: List[Tuple[str, pd.DataFrame]]):
-    from pandas import ExcelWriter
-    bio = BytesIO()
-    with ExcelWriter(bio, engine="openpyxl") as writer:
-        for sheet, df in blocks:
-            df.to_excel(writer, index=False, sheet_name=sheet[:31])
-    bio.seek(0)
-    return bio.getvalue()
+def find_best_objective_for_activities(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """Para cada actividad, encuentra el mejor objetivo posible y su porcentaje de consistencia"""
+    pairs = detect_all_objective_activity_pairs(df)
+    all_activities = extract_all_activities(df)
+    
+    if not all_activities:
+        return []
+    
+    # Extraer todos los objetivos únicos del formulario
+    unique_objectives = set()
+    for _, row in df.iterrows():
+        for obj_col, act_col in pairs:
+            obj_val = row.get(obj_col, "")
+            if has_objective_assigned(obj_val):
+                unique_objectives.add(str(obj_val).strip())
+    
+    unique_objectives = list(unique_objectives)
+    results = []
+    
+    for activity in all_activities:
+        activity_text = activity['actividad_text']
+        current_objective = activity['objetivo_text']
+        
+        best_objective = ""
+        best_score = 0.0
+        
+        # Comparar esta actividad contra TODOS los objetivos disponibles
+        for test_objective in unique_objectives:
+            if not test_objective or test_objective.lower() in ["none", "nan", "null"]:
+                continue
+                
+            # Normalizar textos
+            norm_obj = normalize_text(test_objective)
+            norm_act = normalize_text(activity_text)
+            
+            # Usar textos por defecto si la normalización elimina todo
+            if not norm_obj.strip():
+                norm_obj = "objetivo universitario educacion"
+            if not norm_act.strip():
+                norm_act = "actividad educativa"
+            
+            # Calcular consistencia
+            score = fuzz.token_set_ratio(norm_obj, norm_act)
+            
+            if score > best_score:
+                best_score = score
+                best_objective = test_objective
+        
+        results.append({
+            'actividad': activity_text,
+            'objetivo_actual': current_objective if current_objective else "Sin objetivo asignado",
+            'mejor_objetivo': best_objective if best_objective else "No se encontró objetivo mejor",
+            'porcentaje_consistencia': round(best_score, 1),
+            'participante_id': activity['participant_id'],
+            'mejora_potencial': round(best_score - fuzz.token_set_ratio(
+                normalize_text(current_objective) if current_objective else "objetivo generico",
+                normalize_text(activity_text)
+            ), 1) if current_objective else round(best_score, 1)
+        })
+    
+    # Ordenar por porcentaje de consistencia descendente
+    results.sort(key=lambda x: x['porcentaje_consistencia'], reverse=True)
+    return results
