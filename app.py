@@ -9,11 +9,10 @@ from typing import Dict, List, Tuple, Any
 from collections import Counter, defaultdict
 
 from utils import (
-    normalize_colnames, clean_rows, detect_columns, 
-    compute_pairwise_consistency_single,
+    normalize_colnames, clean_rows, detect_columns, detect_all_objective_activity_pairs,
+    compute_pairwise_consistency_single, analyze_participant_completeness, extract_all_activities,
     parse_pei_pdf, build_plan_index, compute_consistency_pei_single,
-    excel_from_blocks, normalize_text, has_real_activity, has_objective_assigned,
-    count_all_activity_cells, count_activity_objective_pairs
+    excel_from_blocks, normalize_text, has_real_activity, has_objective_assigned
 )
 from rapidfuzz import fuzz
 
@@ -25,7 +24,7 @@ st.title("Análisis de Consistencia - Formulario Único PEI")
 def generate_advanced_report(df: pd.DataFrame, col_obj: str, col_act: str, 
                            scores_col: str = 'score_obj_vs_act',
                            classification_col: str = 'clasificacion_calculada') -> Dict[str, Any]:
-    """Genera un informe avanzado basado en actividades individuales"""
+    """Genera un informe avanzado basado en todas las actividades"""
     report = {}
     
     if len(df) == 0:
@@ -59,17 +58,38 @@ def generate_advanced_report(df: pd.DataFrame, col_obj: str, col_act: str,
     }
     
     # 3. Actividades duplicadas
-    report['duplicados'] = find_duplicate_activities(df, col_act)
+    report['duplicados'] = find_duplicate_activities(df, 'actividad_text')
     
-    # 4. Recomendaciones
+    # 4. Análisis por objetivo
+    if 'objetivo_original' in df.columns:
+        report['por_objetivo'] = analyze_by_objective_column(df)
+    else:
+        report['por_objetivo'] = pd.DataFrame()
+    
+    # 5. Recomendaciones
     report['recomendaciones'] = generate_recommendations(report)
     
     return report
 
+def analyze_by_objective_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Analiza consistencia por columna de objetivo"""
+    try:
+        grouped = df.groupby('objetivo_original').agg({
+            'score_obj_vs_act': ['count', 'mean', 'median'],
+            'clasificacion_calculada': lambda x: (x == 'nula').sum() / len(x) * 100
+        }).round(1)
+        
+        grouped.columns = ['N_actividades', 'Promedio', 'Mediana', 'Porc_en_Bajo']
+        grouped = grouped.sort_values('Promedio').reset_index()
+        
+        return grouped
+    except Exception:
+        return pd.DataFrame()
+
 def find_duplicate_activities(df: pd.DataFrame, col_act: str, threshold: float = 85.0) -> pd.DataFrame:
     """Encuentra actividades duplicadas o muy similares"""
     
-    if len(df) == 0:
+    if len(df) == 0 or col_act not in df.columns:
         return pd.DataFrame()
     
     try:
@@ -153,7 +173,7 @@ def generate_recommendations(report: Dict[str, Any]) -> Dict[str, List[str]]:
     
     return recommendations
 
-def format_report_for_display(report: Dict[str, Any], cell_counts: Dict[str, int]) -> str:
+def format_report_for_display(report: Dict[str, Any], completeness: Dict[str, Any]) -> str:
     """Formatea el reporte para mostrar en Streamlit"""
     
     stats = report['estadisticas_generales']
@@ -162,18 +182,19 @@ def format_report_for_display(report: Dict[str, Any], cell_counts: Dict[str, int
     formatted = f"""
 # Informe de Consistencia PEI
 
-## Resumen del Formulario
-- **Total personas**: {cell_counts['total_cells']} participantes
-- **Actividades propuestas**: {stats['total_actividades']} actividades reales
-- **Celdas "None"**: {cell_counts['none_values']} (sin propuesta para ese objetivo)
-- **Celdas vacías**: {cell_counts['empty_cells']}
+## Resumen de Participación
+- **Total participantes**: {completeness['total_participants']} personas
+- **Participantes con propuestas**: {completeness['complete_participants']} personas ({completeness['complete_participants']/completeness['total_participants']*100:.1f}%)
+- **Sin propuestas**: {completeness['incomplete_participants']} personas
+- **Pares objetivo-actividad detectados**: {completeness['pairs_detected']} columnas
 
-## Estadísticas de Consistencia
+## Estadísticas de Actividades
+- **Total actividades propuestas**: {stats['total_actividades']}
 - **Promedio de consistencia**: {stats['promedio_consistencia']}%
 - **Mediana**: {stats['mediana']}% | **P25**: {stats['p25']}% | **P75**: {stats['p75']}%
 - **Rango**: {stats['minimo']}% - {stats['maximo']}%
 
-## Distribución por Niveles
+## Distribución por Niveles de Consistencia
 - **Alta (≥75%)**: {dist['alta_75_plus']} actividades
 - **Media (50-74%)**: {dist['media_50_74']} actividades  
 - **Baja (<50%)**: {dist['baja_menor_50']} actividades
@@ -182,6 +203,9 @@ def format_report_for_display(report: Dict[str, Any], cell_counts: Dict[str, int
     
     if dist['baja_menor_50'] > dist['alta_75_plus'] + dist['media_50_74']:
         formatted += "⚠️ **Interpretación**: Alta concentración en nivel Bajo sugiere redacciones genéricas u objetivos poco acotados.\n\n"
+    
+    if completeness['incomplete_participants'] > completeness['complete_participants'] * 0.5:
+        formatted += "⚠️ **Atención**: Un número significativo de participantes no realizó propuestas completas.\n\n"
     
     return formatted
 
@@ -206,88 +230,85 @@ df = normalize_colnames(df)
 df_original_size = len(df)
 df = clean_rows(df)
 
-# detectar columnas y permitir cambio
-obj_default, act_default = detect_columns(df)
-st.subheader("Selecciona columnas")
+# Detectar TODOS los pares objetivo-actividad
+all_pairs = detect_all_objective_activity_pairs(df)
+obj_default, act_default = detect_columns(df)  # Para compatibilidad con UI
+
+st.subheader("Columnas Detectadas")
+if all_pairs:
+    st.write(f"**Se detectaron {len(all_pairs)} pares objetivo-actividad:**")
+    for i, (obj_col, act_col) in enumerate(all_pairs, 1):
+        st.write(f"{i}. {obj_col} → {act_col}")
+else:
+    st.error("No se detectaron pares objetivo-actividad válidos")
+    st.stop()
+
+# Selector para análisis individual (para compatibilidad)
+st.subheader("Selecciona un par para análisis detallado")
 c1, c2 = st.columns(2)
 with c1:
-    col_obj = st.selectbox("Columna de **Objetivo específico**", options=list(df.columns), 
-                          index=(list(df.columns).index(obj_default) if obj_default in df.columns else 0))
+    col_obj = st.selectbox("Columna de **Objetivo específico**", options=[p[0] for p in all_pairs])
 with c2:
-    col_act = st.selectbox("Columna de **Actividad**", options=list(df.columns), 
-                          index=(list(df.columns).index(act_default) if act_default in df.columns else (1 if len(df.columns)>1 else 0)))
+    available_acts = [p[1] for p in all_pairs if p[0] == col_obj]
+    col_act = st.selectbox("Columna de **Actividad**", options=available_acts)
 
-# DIAGNÓSTICO CORRECTO
-st.subheader("Diagnóstico del Formulario")
+# DIAGNÓSTICO COMPLETO
+st.subheader("Diagnóstico Completo del Formulario")
 
-# Contar por celdas individuales
-cell_counts = count_all_activity_cells(df, col_act)
-pair_counts = count_activity_objective_pairs(df, col_obj, col_act)
+# Análisis de completitud por participante
+completeness = analyze_participant_completeness(df)
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.metric("Participantes", cell_counts['total_cells'])
+    st.metric("Total Participantes", completeness['total_participants'])
 with col2:
-    st.metric("Actividades Reales", cell_counts['real_activities'])
+    st.metric("Con Propuestas", completeness['complete_participants'])
 with col3:
-    st.metric("Sin Propuesta ('None')", cell_counts['none_values'])
+    st.metric("Sin Propuestas", completeness['incomplete_participants'])
 with col4:
-    st.metric("Celdas Vacías", cell_counts['empty_cells'])
+    st.metric("Total Actividades", completeness['total_activities'])
 
-# Explicación del formulario
+# Explicación del análisis
 st.info(f"""
-📋 **Estructura del Formulario**:
-- **{cell_counts['total_cells']} personas** completaron el formulario
-- **Cada persona** puede proponer actividades para algunos objetivos específicos
-- **"None"** significa "esta persona no propuso actividad para este objetivo"
-- **Se analizan**: {cell_counts['real_activities']} actividades reales propuestas
+📋 **Metodología de Análisis**:
+- **Completitud por participante**: Una persona se considera "con propuestas" si tiene AL MENOS un par objetivo-actividad completo en cualquiera de las {len(all_pairs)} columnas detectadas
+- **Se analizan**: Todas las actividades extraídas de todas las columnas objetivo-actividad
+- **"None"**: Indica que el participante no propuso actividad para ese objetivo específico
 """)
 
-# Análisis detallado por tipos
-st.write("### Análisis por Tipo de Celda")
+# Análisis por columnas
+st.write("### Detalle por Par de Columnas")
 
-col1, col2 = st.columns(2)
+# Extraer todas las actividades para mostrar estadísticas
+all_activities_data = extract_all_activities(df)
 
-with col1:
-    st.write("**Actividades que se ANALIZAN:**")
-    real_activities = df[df[col_act].apply(has_real_activity)]
-    if not real_activities.empty:
-        st.write(f"Total: {len(real_activities)} actividades reales")
-        st.dataframe(real_activities[[col_act]].head(8), use_container_width=True)
-    else:
-        st.warning("No se encontraron actividades reales")
-
-with col2:
-    st.write("**Celdas que NO se analizan:**")
-    non_activities = df[~df[col_act].apply(has_real_activity)]
-    if not non_activities.empty:
-        st.write(f"Total: {len(non_activities)} celdas")
-        # Mostrar tipos de valores no-actividad
-        none_count = non_activities[col_act].apply(lambda x: str(x).strip().lower() == 'none').sum()
-        empty_count = len(non_activities) - none_count
-        
-        st.write(f"- 'None' (sin propuesta): {none_count}")
-        st.write(f"- Vacías/NaN: {empty_count}")
-        
-        st.dataframe(non_activities[[col_act]].head(5), use_container_width=True)
-
-# Relación actividades-objetivos
-st.write("### Relación Actividades-Objetivos")
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    st.metric("Ambos Completos", pair_counts['both_complete'])
-with col2:
-    st.metric("Solo Actividad", pair_counts['activity_only'])
-with col3:
-    st.metric("Solo Objetivo", pair_counts['objective_only'])
-with col4:
-    st.metric("Ambos Vacíos", pair_counts['both_empty'])
+if all_activities_data:
+    activities_by_pair = defaultdict(int)
+    for activity in all_activities_data:
+        pair_name = f"{activity['objetivo_col']} → {activity['actividad_col']}"
+        activities_by_pair[pair_name] += 1
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Actividades por Par de Columnas:**")
+        for pair, count in activities_by_pair.items():
+            st.write(f"- {pair}: {count} actividades")
+    
+    with col2:
+        st.write("**Ejemplos de Actividades Detectadas:**")
+        sample_activities = pd.DataFrame([
+            {'Objetivo': act['objetivo_col'], 'Actividad': act['actividad_text'][:50] + "..." if len(act['actividad_text']) > 50 else act['actividad_text']}
+            for act in all_activities_data[:8]
+        ])
+        st.dataframe(sample_activities, use_container_width=True)
 
 st.subheader("Previsualización")
-st.dataframe(df[[col_obj, col_act]].head(12), use_container_width=True)
+preview_cols = [col_obj, col_act]
+st.dataframe(df[preview_cols].head(12), use_container_width=True)
 
 # Umbrales
-st.subheader("Umbrales")
+st.subheader("Umbrales de Consistencia")
 c1, c2 = st.columns(2)
 with c1:
     t_plena = st.slider("Umbral 'plena'", 70, 100, 88, 1)
@@ -296,25 +317,35 @@ with c2:
 thr = {"plena": float(t_plena), "parcial": float(t_parcial)}
 
 # Análisis de consistencia
-if st.button("Realizar Análisis de Consistencia", type="primary"):
-    with st.spinner("Analizando actividades individuales..."):
+if st.button("Realizar Análisis Completo de Consistencia", type="primary"):
+    with st.spinner("Analizando TODAS las actividades de TODAS las columnas..."):
+        # El análisis ahora usa todas las columnas automáticamente
         sum_indep, det_indep = compute_pairwise_consistency_single(df, uploaded.name, col_obj, col_act, thr)
         
         # Verificar resultados
-        st.success(f"✅ Analizadas {sum_indep['Total actividades']} actividades reales de {cell_counts['total_cells']} participantes")
+        st.success(f"✅ Analizadas {sum_indep['Total actividades']} actividades de {completeness['complete_participants']} participantes con propuestas")
+        
+        if sum_indep['Total actividades'] != completeness['total_activities']:
+            st.warning(f"Discrepancia detectada: Se esperaban {completeness['total_activities']} actividades pero se analizaron {sum_indep['Total actividades']}")
         
         # Generar análisis avanzado
         advanced_report = generate_advanced_report(det_indep, col_obj, col_act)
         
         # Mostrar resumen ejecutivo
         st.markdown("---")
-        st.markdown(format_report_for_display(advanced_report, cell_counts))
+        st.markdown(format_report_for_display(advanced_report, completeness))
+        
+        # Análisis por columna de objetivo
+        if not advanced_report['por_objetivo'].empty:
+            st.subheader("Consistencia por Columna de Objetivo")
+            st.dataframe(advanced_report['por_objetivo'], use_container_width=True)
+            st.caption("Muestra el rendimiento promedio de cada par objetivo-actividad")
         
         # Actividades duplicadas
         st.subheader("Actividades Duplicadas o Similares")
         if not advanced_report['duplicados'].empty:
             st.dataframe(advanced_report['duplicados'], use_container_width=True)
-            st.caption("**Sugerencia**: Consolidar duplicadas como líneas de trabajo con sub-tareas medibles")
+            st.caption("**Sugerencia**: Consolidar duplicadas como líneas de trabajo coordinadas")
         else:
             st.success("No se detectaron actividades duplicadas")
         
@@ -341,11 +372,12 @@ if st.button("Realizar Análisis de Consistencia", type="primary"):
         
         # Preparar bloques para Excel
         blocks = [
-            ("Resumen_Formulario", pd.DataFrame([cell_counts])),
+            ("Resumen_Participantes", pd.DataFrame([completeness])),
             ("Estadisticas_Consistencia", pd.DataFrame([advanced_report['estadisticas_generales']])),
             ("Distribucion_Niveles", pd.DataFrame([advanced_report['distribucion_niveles']])),
+            ("Por_Objetivo", advanced_report['por_objetivo']),
             ("Actividades_Duplicadas", advanced_report['duplicados']),
-            ("Detalle_Actividades", det_indep),
+            ("Detalle_Todas_Actividades", det_indep),
         ]
         
         # Generar Excel
@@ -354,7 +386,7 @@ if st.button("Realizar Análisis de Consistencia", type="primary"):
         st.download_button(
             "Descargar Análisis Excel Completo", 
             data=excel_bytes, 
-            file_name=f"analisis_consistencia_formulario_{ts}.xlsx", 
+            file_name=f"analisis_consistencia_completo_{ts}.xlsx", 
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
@@ -362,7 +394,7 @@ if st.button("Realizar Análisis de Consistencia", type="primary"):
 st.subheader("Análisis contra el PEI (opcional)")
 pei_pdf = st.file_uploader("Subí el PDF del PEI (opcional)", type=["pdf"], key="pei")
 if pei_pdf:
-    with st.spinner("Analizando actividades contra PEI..."):
+    with st.spinner("Analizando todas las actividades contra PEI..."):
         pei = parse_pei_pdf(pei_pdf)
         index = build_plan_index(pei)
     sum_pei, det_pei = compute_consistency_pei_single(df, uploaded.name, col_act, index, thr)
