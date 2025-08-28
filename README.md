@@ -1,45 +1,22 @@
 
-# Calculadora de Consistencia PEI – UCCuyo 2023–2027
+# Calculadora Consistencia PEI UCCuyo (Streamlit)
 
-Esta calculadora permite analizar la coherencia entre las actividades institucionales registradas en el Plan Estratégico Institucional (PEI) de la UCCuyo y sus objetivos específicos para el período 2023–2027.
+Subí 6 CSV (objetivos 1–6) y descarga automáticamente:
+- `consistencia_por_objetivo.xlsx` (detalle + resúmenes)
+- `Informe_consistencia_PEI_UCCuyo.docx` (metodología, resultados, análisis y conclusiones)
 
-## 🚀 ¿Qué hace esta calculadora?
-- Acepta directamente los **6 archivos CSV** de los objetivos del PEI.
-- Calcula automáticamente:
-  - Total de actividades por archivo.
-  - Actividades con **consistencia plena**, **parcial** o **nula**.
-- Genera dos archivos descargables:
-  - 📊 Un Excel con tabla resumen.
-  - 📄 Un documento Word narrado con el análisis.
+## Archivos
+- `app.py`
+- `utils.py`
+- `requirements.txt`
+- `runtime.txt` *(opcional en Streamlit Cloud)*
 
-## 📁 Archivos requeridos
-Subir **6 archivos .CSV**, uno por cada objetivo específico del PEI.
+## Despliegue
+1. Subí estos archivos a un repo de GitHub.
+2. En Streamlit Cloud, elegí el repo y como **Main file**: `app.py`.
+3. Con `requirements.txt` alcanza; `runtime.txt` es opcional.
 
-## 🧑‍💻 Cómo ejecutar localmente
-
-1. Clonar este repositorio o descargar los archivos.
-2. Crear un entorno virtual (opcional pero recomendado):
-
-```bash
-python -m venv venv
-source venv/bin/activate  # En Windows: venv\Scripts\activate
-```
-
-3. Instalar dependencias:
-
-```bash
-pip install -r requirements.txt
-```
-
-4. Ejecutar la aplicación:
-
-```bash
-streamlit run app.py
-```
-
-## 📦 Despliegue en Streamlit Cloud
-Podés subir los 3 archivos (`app.py`, `requirements.txt`, `README.md`) a un repositorio de GitHub y desplegarlo en [streamlit.io](https://streamlit.io/). No se necesita archivo adicional de referencia.
-
----
-
-Desarrollado para la Secretaría de Investigación – UCCuyo.
+## Notas
+- Se ignoran filas con “-” o sin actividad.
+- La columna **“Consistencia del objetivo (%)”** se agrega al detalle.
+- La consistencia se detecta si “Objetivos específicos X” inicia con `X.n` (p. ej., `1.5`). Si no hay código pero menciona el objetivo → **Parcial**; de lo contrario → **Sin correspondencia**.
