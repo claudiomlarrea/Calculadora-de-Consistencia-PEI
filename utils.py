@@ -7,7 +7,7 @@ from rapidfuzz import fuzz
 from pypdf import PdfReader
 
 # -------------------- Helpers --------------------
-EMPTY_TOKENS = {"", "nan", "none", "-", "–", "—"}
+EMPTY_TOKENS = {"", "nan", "none", "-", "–", "—", "null", "n/a", "na"}
 
 SPANISH_STOP = set("""a al algo alguna algunas alguno algunos ante antes como con contra cual cuales cuando de del desde donde dos el la los las en entre era erais eramos eran es esa esas ese eso esos esta estas este esto estos fue fuerais fuéramos fueran fui fuimos ha haber habia había habiais habíamos habían han has hasta hay la lo las los le les mas más me mi mis mucho muy nada ni no nos nosotras nosotros o os otra otras otro otros para pero poco por porque que quien quienes se sin sobre sois somos son soy su sus te tenia tenía teniais teníamos tenían tengo ti tu tus un una uno unas unos y ya""".split())
 
@@ -31,34 +31,29 @@ def normalize_colnames(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def is_empty_value(v) -> bool:
-    """Versión menos restrictiva - solo considera vacíos los valores realmente nulos"""
+    """Ultra-permisivo: solo considera vacíos valores realmente nulos o palabras vacías específicas"""
     if pd.isna(v):
         return True
     v_str = str(v).strip().lower()
-    # Solo considera vacíos: cadenas completamente vacías, "nan", "none"
-    return v_str in {"", "nan", "none"}
+    return v_str in EMPTY_TOKENS
 
-def is_meaningful_text(v, min_length: int = 5) -> bool:
-    """Verifica si el texto tiene contenido significativo"""
-    if is_empty_value(v):
+def is_meaningful_text(v, min_length: int = 1) -> bool:
+    """Ultra-permisivo: acepta cualquier texto que no esté explícitamente vacío"""
+    if pd.isna(v):
         return False
     text = str(v).strip()
-    # Considera significativo si tiene al menos min_length caracteres y no es solo números/símbolos
-    return len(text) >= min_length and bool(re.search(r'[a-záéíóúñ]', text.lower()))
+    # Si está en la lista de tokens vacíos, no es válido
+    if text.lower() in EMPTY_TOKENS:
+        return False
+    # Cualquier cosa con al menos 1 carácter que no sea solo espacios/símbolos
+    return len(text) >= min_length and text not in ["", " ", "\t", "\n"]
 
 def clean_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Limpieza mínima - solo elimina filas completamente vacías"""
     if df is None or df.empty:
         return df
-    tmp = df.dropna(how="all", axis=1)
-    def row_empty(r):
-        any_val = False
-        for v in r:
-            if is_meaningful_text(v, min_length=3):  # Menos restrictivo
-                any_val = True
-                break
-        return not any_val
-    mask = tmp.apply(row_empty, axis=1)
-    return tmp.loc[~mask].reset_index(drop=True)
+    # Solo eliminar filas que son completamente vacías en TODAS las columnas
+    return df.dropna(how='all').reset_index(drop=True)
 
 def detect_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
     """Devuelve (objetivo_col, actividad_col) por heurística de nombre."""
@@ -78,53 +73,60 @@ def detect_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
     return obj_col, act_col
 
 def count_valid_pairs(df: pd.DataFrame, col_obj: str, col_act: str) -> int:
-    """Cuenta pares válidos - solo requiere que la actividad tenga contenido"""
-    return int((df[col_act].apply(lambda x: is_meaningful_text(x, min_length=5))).sum())
+    """Cuenta pares donde ambos campos tienen contenido (menos restrictivo)"""
+    valid_obj = df[col_obj].apply(lambda x: is_meaningful_text(x, min_length=1))
+    valid_act = df[col_act].apply(lambda x: is_meaningful_text(x, min_length=1))
+    return int((valid_obj & valid_act).sum())
 
 def count_all_activities(df: pd.DataFrame, col_act: str) -> int:
-    """Cuenta todas las actividades con contenido significativo"""
-    return int((df[col_act].apply(lambda x: is_meaningful_text(x, min_length=3))).sum())
+    """Cuenta todas las actividades con cualquier contenido"""
+    return int(df[col_act].apply(lambda x: is_meaningful_text(x, min_length=1)).sum())
+
+def count_with_objective(df: pd.DataFrame, col_obj: str) -> int:
+    """Cuenta filas con objetivo asignado"""
+    return int(df[col_obj].apply(lambda x: is_meaningful_text(x, min_length=1)).sum())
 
 # -------------------- Consistencia independiente (col2 vs col1) --------------------
 def compute_pairwise_consistency_single(df: pd.DataFrame, name: str, col_obj: str, col_act: str, thresholds: Dict[str,float]):
     df = clean_rows(df.copy())
     scores, cats = [], []
     
+    valid_rows = []
+    
     for _, row in df.iterrows():
         activity_text = str(row.get(col_act, ""))
         objective_text = str(row.get(col_obj, ""))
         
-        # Si la actividad no tiene contenido significativo, skip
-        if not is_meaningful_text(activity_text, min_length=3):
+        # Procesar CUALQUIER actividad que tenga contenido (ultra-permisivo)
+        if not is_meaningful_text(activity_text, min_length=1):
             continue
             
-        # Si no hay objetivo, usar texto genérico para comparación
-        if is_empty_value(objective_text):
-            objective_text = "objetivo actividad universitaria educacion"
+        valid_rows.append(row)
+        
+        # Si no hay objetivo, usar texto genérico
+        if not is_meaningful_text(objective_text, min_length=1):
+            objective_text = "objetivo actividad universitaria educacion plan estrategico"
         
         a = normalize_text(objective_text)
         b = normalize_text(activity_text)
         
+        # Si después de normalizar no queda nada útil, usar textos por defecto
+        if not a.strip():
+            a = "objetivo universitario educacion"
+        if not b.strip():
+            b = "actividad educativa universitaria"
+            
         s = fuzz.token_set_ratio(a, b)
         cat = classify_consistency(float(s), True, thresholds)
         scores.append(float(s))
         cats.append(cat)
 
-    # Crear DataFrame solo con las filas procesadas
-    valid_rows = []
-    score_idx = 0
-    
-    for _, row in df.iterrows():
-        if is_meaningful_text(str(row.get(col_act, "")), min_length=3):
-            row_data = row.copy()
-            row_data["col_objetivo"] = col_obj
-            row_data["col_actividad"] = col_act
-            row_data["score_obj_vs_act"] = scores[score_idx]
-            row_data["clasificacion_calculada"] = cats[score_idx]
-            valid_rows.append(row_data)
-            score_idx += 1
-    
-    out = pd.DataFrame(valid_rows)
+    # Crear DataFrame con todas las filas válidas
+    out = pd.DataFrame(valid_rows).copy()
+    out["col_objetivo"] = col_obj
+    out["col_actividad"] = col_act
+    out["score_obj_vs_act"] = scores
+    out["clasificacion_calculada"] = cats
     
     counts = pd.Series(cats).value_counts(dropna=False).to_dict()
     total = len(valid_rows)
@@ -212,12 +214,17 @@ def compute_consistency_pei_single(df: pd.DataFrame, name: str, col_act: str, pl
     for _, row in df.iterrows():
         activity_text = str(row.get(col_act, ""))
         
-        # Solo procesar actividades con contenido significativo
-        if not is_meaningful_text(activity_text, min_length=3):
+        # Ultra-permisivo: procesar cualquier actividad con contenido
+        if not is_meaningful_text(activity_text, min_length=1):
             continue
             
         valid_activities.append(row)
         text = normalize_text(activity_text)
+        
+        # Si el texto normalizado está vacío, usar uno por defecto
+        if not text.strip():
+            text = "actividad educativa universitaria"
+            
         best, score = None, -1.0
         for entry in plan_index:
             s = fuzz.token_set_ratio(text, entry["texto"])
