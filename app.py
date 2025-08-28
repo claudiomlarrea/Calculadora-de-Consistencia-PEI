@@ -1,113 +1,147 @@
-
-import streamlit as st
-import pandas as pd
-import numpy as np
 import io
-import re
-import matplotlib.pyplot as plt
+import datetime as dt
+from pathlib import Path
+import pandas as pd
+import streamlit as st
 
-st.set_page_config(page_title="Calculadora Consistencia PEI UCCuyo", layout="wide")
-st.title("Calculadora de Consistencia con el PEI 2023–2027 (UCCuyo)")
-st.caption("Subí las 6 tablas de actividades (Objetivos 1 a 6). La app genera automáticamente el Excel y el Informe Word.")
-
-# Import defensivo del módulo local (evita choque con paquetes llamados 'utils')
-try:
-    from pei_utils import (
-        parse_uploaded_files,
-        build_all_acts_and_summaries,
-        build_excel_bytes,
-        build_word_bytes,
-    )
-except Exception as e:
-    st.error("Error al importar el módulo interno 'pei_utils'. Verificá que el archivo 'pei_utils.py' esté en el mismo directorio que 'app.py'.")
-    st.exception(e)
-    st.stop()
-
-with st.expander("Instrucciones de carga", expanded=True):
-    st.markdown("""
-    - Subí **exactamente 6 archivos CSV**, uno por objetivo (1 a 6).
-    - No importa el orden ni el nombre del archivo; la calculadora detecta el objetivo **por las columnas** internas.
-    - Campos esperados por archivo: `AÑO`, `Objetivos específicos X`, `Actividades Objetivo X`, `Detalle de la Actividad Objetivo X`, `Unidad Académica o Administrativa` (con o sin espacios iniciales).
-    - Se ignoran filas sin actividad real (marcadores con “-”).
-    """)
-
-uploaded = st.file_uploader(
-    "Arrastrá y soltá aquí los 6 CSV",
-    type=["csv"],
-    accept_multiple_files=True,
-    help="Podés seleccionar múltiples archivos a la vez.",
+from utils import (
+    normalize_colnames,
+    parse_pei_pdf,
+    build_plan_index,
+    compute_consistency_with_plan,
+    build_excel_report,
+    build_word_report,
 )
 
+st.set_page_config(page_title="Calculadora de Consistencia PEI – UCCuyo 2023–2027 (correlación con PEI)",
+                   layout="wide")
+
+st.title("📊 Calculadora de Consistencia PEI – UCCuyo 2023–2027 (correlación con PEI)")
+st.caption("Carga 6 archivos de actividades (CSV/XLSX) + el PDF del Plan Estratégico para correlacionar actividad ↔ objetivo/acción/indicador.")
+
+with st.expander("Instrucciones", expanded=False):
+    st.markdown("""
+    1) Subí **el PDF del Plan Estratégico** (PEI).  
+    2) Subí los **6 archivos** de actividades (CSV, XLSX o XLS). Podés hacerlo **en tandas**: la app acumula hasta llegar a 6.  
+    3) Ajustá los **umbrales** de clasificación si querés ser más estricto.  
+    4) Descargá **Excel** (Resumen + Matriz + Detalle) y **Word** narrado.
+    """)
+
+# --- Sección: cargar PEI (PDF) ---
+pei_pdf = st.file_uploader("📄 Subí el PDF del Plan Estratégico Institucional (PEI)", type=["pdf"], accept_multiple_files=False)
+plan_index = None
+if pei_pdf:
+    with st.spinner("Leyendo y analizando el PEI…"):
+        try:
+            pei_struct = parse_pei_pdf(pei_pdf)
+            plan_index = build_plan_index(pei_struct)
+        except Exception as e:
+            st.error(f"No pude leer el PDF del PEI. Detalle: {e}")
+            st.stop()
+    st.success(f"PEI cargado. Objetivos detectados: {len(pei_struct)} | Entradas en índice: {len(plan_index)}")
+    with st.expander("Ver índice (primeras 10 entradas)", expanded=False):
+        if plan_index:
+            st.dataframe(pd.DataFrame(plan_index).head(10))
+
+if not plan_index:
+    st.info("Subí primero el **PDF del PEI** para poder correlacionar actividades con Objetivos/Acciones/Indicadores.")
+    st.stop()
+
+# --- Sección: carga de archivos de actividades ---
+if "file_bufs" not in st.session_state:
+    st.session_state.file_bufs = []
+    st.session_state.file_names = []
+
+uploaded = st.file_uploader("📦 Subí 1 o más archivos de actividades (CSV, XLSX, XLS)",
+                            type=["csv","xlsx","xls"],
+                            accept_multiple_files=True)
+
 if uploaded:
-    if len(uploaded) != 6:
-        st.warning(f"Se detectaron **{len(uploaded)}** archivos. Subí **exactamente 6** (Objetivos 1 a 6).")
-    else:
-        with st.spinner("Procesando archivos…"):
+    for f in uploaded:
+        if f.name not in st.session_state.file_names:
+            st.session_state.file_bufs.append(f.getvalue())
+            st.session_state.file_names.append(f.name)
+    st.success(f"Se agregaron {len(uploaded)} archivo(s). Total acumulado: {len(st.session_state.file_names)}/6.")
+
+if st.session_state.file_names:
+    st.subheader("Archivos acumulados")
+    st.write(", ".join(st.session_state.file_names))
+    if st.button("🗑️ Limpiar lista"):
+        st.session_state.file_bufs = []
+        st.session_state.file_names = []
+        st.experimental_rerun()
+
+total = len(st.session_state.file_names)
+if total < 6:
+    st.info("Subí los archivos restantes hasta alcanzar **6** para habilitar el análisis.")
+    st.stop()
+if total > 6:
+    st.error("Hay más de 6 archivos. Limpiá la lista y subí exactamente 6.")
+    st.stop()
+
+# Leer archivos
+dfs, names = [], []
+for name, data in zip(st.session_state.file_names, st.session_state.file_bufs):
+    bio = io.BytesIO(data); bio.name = name
+    suffix = Path(name).suffix.lower()
+    try:
+        if suffix in [".xlsx", ".xls"]:
+            df = pd.read_excel(bio, engine="openpyxl")
+        else:
             try:
-                raw_by_obj = parse_uploaded_files(uploaded)  # dict {1..6: df}
-                if set(raw_by_obj.keys()) != set(range(1,7)):
-                    st.error("No se pudieron identificar todos los objetivos (1 a 6) a partir de las columnas. Verificá que cada CSV tenga las columnas estándar.")
-                else:
-                    all_acts, pivot_summary, pivot_counts, dist_codigo, top_codigos, unidades_desvio = build_all_acts_and_summaries(raw_by_obj)
+                df = pd.read_csv(bio, encoding="utf-8", sep=None, engine="python")
+            except Exception:
+                bio.seek(0); df = pd.read_csv(bio, encoding="latin-1", sep=None, engine="python")
+    except Exception as e:
+        st.error(f"❌ No pude leer '{name}'. Detalle: {e}"); st.stop()
+    dfs.append(normalize_colnames(df))
+    names.append(Path(name).stem)
 
-                    st.success(f"¡Listo! Se analizaron {len(all_acts)} actividades.")
+st.success("✅ Se recibieron 6 archivos correctamente.")
 
-                    # Vistas
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.subheader("Porcentaje por objetivo")
-                        st.dataframe(pivot_summary, use_container_width=True)
-                    with c2:
-                        st.subheader("Cantidades por objetivo")
-                        st.dataframe(pivot_counts, use_container_width=True)
+# --- Umbrales de clasificación (conservadores) ---
+st.subheader("⚙️ Umbrales de clasificación (conservadores)")
+c1, c2 = st.columns(2)
+with c1:
+    t_plena = st.slider("Umbral 'plena' (requiere además coherencia de objetivo si hay pista)", min_value=70, max_value=100, value=88, step=1)
+with c2:
+    t_parcial = st.slider("Umbral 'parcial'", min_value=50, max_value=90, value=68, step=1)
 
-                    # Gráfico
-                    st.subheader("Consistencia con PEI por Objetivo (%)")
-                    label_cons = "Consistente con PEI (objetivo específico identificado)"
-                    if label_cons in pivot_summary.columns:
-                        consistent = pivot_summary[["Objetivo", label_cons]].copy()
-                        consistent = consistent.sort_values("Objetivo")
-                        fig, ax = plt.subplots(figsize=(6,4))
-                        ax.bar(consistent["Objetivo"].astype(int), consistent[label_cons])
-                        ax.set_xlabel("Objetivo")
-                        ax.set_ylabel("Porcentaje de actividades consistentes")
-                        ax.set_title("Consistencia con PEI por Objetivo (%)")
-                        st.pyplot(fig, clear_figure=True)
-                    else:
-                        fig = None
-                        st.info("No se pudo construir el gráfico (columna de consistencia no disponible).")
+thresholds = {"plena": float(t_plena), "parcial": float(t_parcial)}
 
-                    st.subheader("Detalle de actividades (con % de consistencia por objetivo)")
-                    st.dataframe(all_acts, use_container_width=True)
+# --- Cálculo de correlación exacta contra PEI ---
+with st.spinner("Calculando correlación actividad ↔ PEI…"):
+    summary_df, detail_tables, matrix_df = compute_consistency_with_plan(dfs, names, plan_index, thresholds)
 
-                    # Descargas
-                    xlsx_bytes = build_excel_bytes(all_acts, pivot_summary, pivot_counts, dist_codigo, top_codigos, unidades_desvio)
-                    st.download_button(
-                        label="⬇️ Descargar Excel (consistencia_por_objetivo.xlsx)",
-                        data=xlsx_bytes,
-                        file_name="consistencia_por_objetivo.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                    )
+st.subheader("📊 Resumen")
+st.dataframe(summary_df, use_container_width=True)
 
-                    if fig is not None:
-                        docx_bytes = build_word_bytes(all_acts, pivot_summary, pivot_counts, dist_codigo, top_codigos, unidades_desvio, fig)
-                        st.download_button(
-                            label="⬇️ Descargar Informe Word (Informe_consistencia_PEI_UCCuyo.docx)",
-                            data=docx_bytes,
-                            file_name="Informe_consistencia_PEI_UCCuyo.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                            use_container_width=True,
-                        )
+if not matrix_df.empty:
+    st.subheader("🧮 Matriz por OBJETIVO (conteos por categoría)")
+    st.dataframe(matrix_df, use_container_width=True)
 
-                    with st.expander("Tablas auxiliares"):
-                        st.write("Top códigos por objetivo")
-                        st.dataframe(top_codigos, use_container_width=True)
-                        st.write("Unidades con mayor número de desvíos")
-                        st.dataframe(unidades_desvio, use_container_width=True)
+# Descargas
+ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+excel_bytes = build_excel_report(summary_df, detail_tables, labels_used=None, matrix_df=matrix_df)
 
-            except Exception as e:
-                st.error("Ocurrió un error durante el procesamiento.")
-                st.exception(e)
-else:
-    st.info("Esperando que subas los 6 CSV…")
+word_bytes = None
+try:
+    totals = summary_df[["Total actividades","Consistencia plena","Consistencia parcial","Consistencia nula","Sin clasificar"]].sum()
+    word_bytes = build_word_report(summary_df, totals, names)
+except Exception:
+    word_bytes = None
+
+c1, c2 = st.columns(2)
+with c1:
+    st.download_button("⬇️ Descargar Excel (Resumen+Matriz+Detalle)",
+                       data=excel_bytes,
+                       file_name=f"reporte_correlacion_{ts}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+with c2:
+    if word_bytes:
+        st.download_button("⬇️ Descargar Word (informe narrado)",
+                           data=word_bytes,
+                           file_name=f"informe_correlacion_{ts}.docx",
+                           mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    else:
+        st.info("No se generó el Word (posible falta de 'python-docx'). Descarga disponible: Excel.")
