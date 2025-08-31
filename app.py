@@ -2,285 +2,320 @@
 import io
 import re
 import unicodedata
-import datetime as dt
-from typing import Dict, Any
-
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ------------- Similaridad robusta (rapidfuzz si está, difflib si no) -------------
+# --- Optional: try sklearn, fall back gracefully ---
 try:
-    from rapidfuzz import fuzz as _rf_fuzz
-    def token_set_ratio(a: str, b: str) -> float:
-        return float(_rf_fuzz.token_set_ratio(a, b))
-except Exception:
-    from difflib import SequenceMatcher
-    def token_set_ratio(a: str, b: str) -> float:
-        sa = " ".join(sorted(set(str(a).split())))
-        sb = " ".join(sorted(set(str(b).split())))
-        return 100.0 * SequenceMatcher(None, sa, sb).ratio()
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    SKLEARN_OK = True
+except Exception as e:
+    SKLEARN_OK = False
 
-# -------------------- Normalización y utilidades --------------------
-EMPTY_TOKENS = {"", "nan", "none", "-", "—", "–"}
-SPANISH_STOP = set("""a al algo alguna algunas alguno algunos ante antes como con contra cual cuales cuando de del desde donde dos el la los las en entre era erais eramos eran es esa esas ese eso esos esta estas este esto estos fue fuerais fuéramos fueran fui fuimos ha haber habia había habiais habíamos habían han has hasta hay la lo las los le les mas más me mi mis mucho muy nada ni no nos nosotras nosotros o os otra otras otro otros para pero poco por porque que quien quienes se sin sobre sois somos son soy su sus te tenia tenía teniais teníamos tenían tengo ti tu tus un una uno unas unos y ya""".split())
-
-def strip_accents(s: str) -> str:
-    return unicodedata.normalize('NFKD', str(s)).encode('ascii', 'ignore').decode('ascii')
+# -------------------- Text helpers --------------------
+SPANISH_STOPWORDS = set("""
+a al algo alguna algunas alguno algunos ante antes como con contra cual cuales cuando de del desde donde dos el 
+ella ellas ello ellos en entre era erais eran eras eres es esa esas ese eso esos esta estaba estais estaban estabas 
+estad estada estado estais estamos estan estar estara estas este esto estos estoy fue fueron fui fuimos ha habiendo 
+habla hablar hablaron hace hacen hacer hacerlo hacia han hasta hay haya he la las le les lo los mas me mi mia mias 
+mientras mio mios mis mucha muchas mucho muchos muy nada ni no nos nosotras nosotros nuestra nuestras nuestro nuestros 
+nunca o os otra otras otro otros para pero poco por porque podria puedo pues que quien quienes se sea sean segun ser 
+si siempre sin sobre sr sra sres su sus te tener tiene tienen toda todas todo todos tu tus un una uno unos usted ustedes 
+ya y cuáles cuál cuál/cuál qué que/qué quién quiénes dónde cuándo cómo porqué también sólo según 
+""".split())
 
 def normalize_text(s: str) -> str:
-    s = strip_accents(str(s).lower())
-    s = re.sub(r"[^a-z0-9áéíóúñ\s]", " ", s)
+    if pd.isna(s):
+        return ""
+    s = str(s).lower()
+    s = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+    s = re.sub(r"[^a-z0-9áéíóúñü\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    tokens = [t for t in s.split() if t not in SPANISH_STOP and len(t) > 2]
-    return " ".join(tokens)
+    return s
 
-def normalize_colnames(df: pd.DataFrame) -> pd.DataFrame:
-    def norm(s):
-        s = strip_accents(str(s)).lower()
-        s = re.sub(r"\s+", " ", s).strip()
-        return s
-    out = df.copy()
-    out.columns = [norm(c) for c in out.columns]
-    return out
+def tokenize(text: str):
+    text = normalize_text(text)
+    toks = [t for t in text.split() if t not in SPANISH_STOPWORDS and len(t) > 2]
+    return toks
 
-def is_empty_value(v) -> bool:
-    return str(v).strip().lower() in EMPTY_TOKENS
+def keyword_overlap_score(activity_text, objective_text):
+    a_tokens = set(tokenize(activity_text))
+    o_tokens = set(tokenize(objective_text))
+    if not a_tokens or not o_tokens:
+        return 0.0
+    overlap = len(a_tokens & o_tokens)
+    denom = np.sqrt(len(a_tokens) * len(o_tokens))
+    return overlap / denom
 
-def clean_rows(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    tmp = df.dropna(how="all", axis=1)
-    def row_empty(r):
-        return all(is_empty_value(v) for v in r)
-    mask = tmp.apply(row_empty, axis=1)
-    return tmp.loc[~mask].reset_index(drop=True)
+def top_overlap_terms(activity_text, objective_text, topn=6):
+    a_tokens = tokenize(activity_text)
+    o_tokens = set(tokenize(objective_text))
+    common = [t for t in a_tokens if t in o_tokens]
+    # Return most frequent tokens among common
+    from collections import Counter
+    freq = Counter(common)
+    return ", ".join([w for w, _ in freq.most_common(topn)])
 
+# -------------------- Core logic --------------------
 def detect_columns(df: pd.DataFrame):
-    cols = list(df.columns)
-    obj_candidates = [c for c in cols if any(k in c for k in [
-        "objetivo especific", "objetivos especific", "objetivo espe", "objetivo 1", "obj 1", "especifico"
-    ])]
-    act_candidates = [c for c in cols if any(k in c for k in [
-        "actividades objetivo", "actividad objetivo", "actividad", "acciones", "accion"
-    ])]
-    obj_col = obj_candidates[0] if obj_candidates else (cols[0] if cols else None)
-    act_candidates = [c for c in act_candidates if c != obj_col] or [c for c in cols if c != obj_col]
-    act_col = act_candidates[0] if act_candidates else None
-    return obj_col, act_col
+    # Try common names
+    col_act = None
+    for c in df.columns:
+        if re.search(r'(actividad|descripci[oó]n)', str(c), re.I):
+            col_act = c; break
+    col_obj_actual = None
+    for c in df.columns:
+        if re.search(r'(obj.*actual)', str(c), re.I):
+            col_obj_actual = c; break
+    col_obj_sug = None
+    for c in df.columns:
+        if re.search(r'(obj.*sugerid)', str(c), re.I):
+            col_obj_sug = c; break
+    return col_act, col_obj_actual, col_obj_sug
 
-def count_valid_pairs(df: pd.DataFrame, col_obj: str, col_act: str) -> int:
-    def ok(v): return not is_empty_value(v)
-    return int(((df[col_obj].apply(ok)) & (df[col_act].apply(ok))).sum())
+def build_objective_catalog(df, col_obj_actual, col_obj_sug, cat_df=None):
+    if cat_df is not None and not cat_df.empty:
+        # Try to detect columns in provided catalog
+        name_col = None; desc_col = None
+        for c in cat_df.columns:
+            if re.search(r'(objetivo|nombre|t[ií]tulo)', str(c), re.I):
+                name_col = c; break
+        for c in cat_df.columns:
+            if re.search(r'(desc|detalle|enunciado|texto)', str(c), re.I):
+                desc_col = c; break
+        if name_col is None:
+            name_col = cat_df.columns[0]
+        if desc_col is None:
+            desc_col = name_col
+        out = cat_df[[name_col, desc_col]].copy()
+        out.columns = ["Objetivo", "DescripcionObjetivo"]
+        out["Objetivo"] = out["Objetivo"].astype(str).str.strip()
+        out["DescripcionObjetivo"] = out["DescripcionObjetivo"].astype(str)
+        out = out.drop_duplicates(subset=["Objetivo"]).reset_index(drop=True)
+        return out
 
-def _obj_general_token(obj_text: str) -> str:
-    s = str(obj_text).strip()
-    m = re.match(r"^\s*([1-9])(\.|[\s])", s)
-    return f"Obj {m.group(1)}" if m else "OTROS/SIN ID"
+    # Otherwise infer from data
+    vals = []
+    if col_obj_actual:
+        vals.append(df[col_obj_actual].dropna().astype(str))
+    if col_obj_sug:
+        vals.append(df[col_obj_sug].dropna().astype(str))
+    if not vals:
+        return pd.DataFrame({"Objetivo": [], "DescripcionObjetivo": []})
+    objetivos = pd.concat(vals).unique()
+    cat = pd.DataFrame({"Objetivo": objetivos})
+    cat["DescripcionObjetivo"] = cat["Objetivo"]
+    return cat
 
-def classify(score: float, thr_full=88.0, thr_partial=68.0) -> str:
-    if score >= thr_full: return "plena"
-    if score >= thr_partial: return "parcial"
-    return "nula"
+def jaccard_matrix(A, B):
+    M = np.zeros((len(A), len(B)))
+    for i, a in enumerate(A):
+        for j, b in enumerate(B):
+            inter = len(a & b)
+            union = len(a | b) or 1
+            M[i, j] = inter / union
+    return M
 
-def best_alt_objective(activity_norm: str, current_obj: str, unique_objs_norm):
-    best_txt, best_score = None, -1.0
-    cur_norm = normalize_text(current_obj)
-    for raw, norm in unique_objs_norm:
-        if norm == cur_norm: continue
-        s = token_set_ratio(activity_norm, norm)
-        if s > best_score:
-            best_score = s; best_txt = raw
-    return best_txt, float(best_score)
+def score_and_recommend(df, obj_catalog, col_act, col_obj_actual, col_obj_sug,
+                        w_name=0.35, w_profA=0.30, w_profS=0.25, w_overlap=0.10, balance_lambda=0.12):
+    # Clean
+    df = df.copy()
+    for c in [col_act, col_obj_actual, col_obj_sug]:
+        if c and c in df.columns:
+            df[c] = df[c].astype(str).fillna("")
+    obj_catalog = obj_catalog.copy()
+    obj_catalog["Objetivo"] = obj_catalog["Objetivo"].astype(str)
+    obj_catalog["DescripcionObjetivo"] = obj_catalog["DescripcionObjetivo"].astype(str)
 
-def analyze_independent(df: pd.DataFrame, name: str, col_obj: str, col_act: str, thr_full=88.0, thr_partial=68.0):
-    df = clean_rows(df.copy())
-    total_cargadas = len(df)
-
-    df["_obj_txt"] = df[col_obj].astype(str)
-    df["_act_txt"] = df[col_act].astype(str)
-    df["_obj_norm"] = df["_obj_txt"].map(normalize_text)
-    df["_act_norm"] = df["_act_txt"].map(normalize_text)
-
-    valid_mask = (~df[col_obj].apply(is_empty_value)) & (~df[col_act].apply(is_empty_value))
-    valid = df.loc[valid_mask].copy().reset_index(drop=True)
-
-    unique_objs = list(dict.fromkeys(valid[col_obj].astype(str).tolist()))
-    unique_objs_norm = [(t, normalize_text(t)) for t in unique_objs]
-
-    score_arr = np.full(total_cargadas, np.nan, dtype=float)
-    cat_arr   = np.array(["sin_datos"]*total_cargadas, dtype=object)
-    alt_obj   = np.array([None]*total_cargadas, dtype=object)
-    alt_score = np.full(total_cargadas, np.nan, dtype=float)
-    delta_pp  = np.full(total_cargadas, np.nan, dtype=float)
-
-    for idx_valid, row in valid.iterrows():
-        idx = valid_mask[valid_mask].index[idx_valid]
-        s = token_set_ratio(row["_obj_norm"], row["_act_norm"])
-        cat = classify(float(s), thr_full, thr_partial)
-        bo, bs = best_alt_objective(row["_act_norm"], row[col_obj], unique_objs_norm)
-        score_arr[idx] = float(s)
-        cat_arr[idx]   = cat
-        alt_obj[idx]   = bo
-        alt_score[idx] = float(bs)
-        delta_pp[idx]  = float(bs - s)
-
-    detalle_full = df[[col_obj, col_act]].copy()
-    detalle_full.rename(columns={col_obj:"Objetivo específico", col_act:"Actividad (seleccionada)"}, inplace=True)
-    detalle_full["% actual (objetivo↔actividad)"] = np.round(score_arr, 1)
-    detalle_full["clasificacion"] = cat_arr
-    detalle_full["Mejor objetivo propuesto"] = alt_obj
-    detalle_full["% si se ubica en objetivo propuesto"] = np.round(alt_score, 1)
-    detalle_full["Δ p.p. (objetivo propuesto - actual)"] = np.round(delta_pp, 1)
-    detalle_full["Objetivo general (1..n)"] = detalle_full["Objetivo específico"].map(_obj_general_token)
-
-    counts = pd.Series(cat_arr).value_counts(dropna=False).to_dict()
-    total_validas = int(valid_mask.sum())
-    resumen = {
-        "Fuente": name,
-        "Total actividades (cargadas)": int(total_cargadas),
-        "Total actividades (evaluadas)": int(total_validas),
-        "Consistencia plena": int(counts.get("plena",0)),
-        "Consistencia parcial": int(counts.get("parcial",0)),
-        "Consistencia nula": int(counts.get("nula",0)),
-        "Sin datos": int(counts.get("sin_datos",0)),
-    }
-
-    cons_obj = (detalle_full.loc[detalle_full["clasificacion"]!="sin_datos"]
-                .groupby("Objetivo específico")["% actual (objetivo↔actividad)"]
-                .agg(["count","mean","median"])
-                .rename(columns={"count":"N","mean":"Promedio","median":"Mediana"}))
-    if not cons_obj.empty:
-        cons_obj["p25"] = (detalle_full.loc[detalle_full["clasificacion"]!="sin_datos"]
-                           .groupby("Objetivo específico")["% actual (objetivo↔actividad)"].quantile(0.25))
-        cons_obj["p75"] = (detalle_full.loc[detalle_full["clasificacion"]!="sin_datos"]
-                           .groupby("Objetivo específico")["% actual (objetivo↔actividad)"].quantile(0.75))
-        cons_obj["std"] = (detalle_full.loc[detalle_full["clasificacion"]!="sin_datos"]
-                           .groupby("Objetivo específico")["% actual (objetivo↔actividad)"].std(ddof=0))
-        low = (detalle_full.assign(_low = detalle_full["clasificacion"].eq("nula"))
-               .loc[detalle_full["clasificacion"]!="sin_datos"]
-               .groupby("Objetivo específico")["_low"].mean().rename("% en Bajo"))
-        cons_obj = cons_obj.join(low)
-        cons_obj["% en Bajo"] = (cons_obj["% en Bajo"]*100).round(1)
-        cons_obj = cons_obj.reset_index().sort_values("% en Bajo", ascending=False)
+    # Build profiles
+    objetivos = obj_catalog["Objetivo"].tolist()
+    if SKLEARN_OK:
+        perfil_actual = {o: " ".join([normalize_text(t) for t in df.loc[(col_obj_actual and df[col_obj_actual]==o), col_act].astype(str).tolist()]) for o in objetivos}
+        perfil_sugerido = {o: " ".join([normalize_text(t) for t in df.loc[(col_obj_sug and df[col_obj_sug]==o), col_act].astype(str).tolist()]) for o in objetivos}
+        docs_activ = [normalize_text(t) for t in df[col_act].tolist()]
+        docs_names = [normalize_text(o) for o in objetivos]
+        docs_profA = [perfil_actual[o] for o in objetivos]
+        docs_profS = [perfil_sugerido[o] for o in objetivos]
+        vectorizer = TfidfVectorizer(ngram_range=(1,2), min_df=1, max_df=0.95)
+        X = vectorizer.fit_transform(docs_activ + docs_names + docs_profA + docs_profS)
+        n_act = len(docs_activ); n_obj = len(docs_names)
+        X_act = X[:n_act]
+        X_name = X[n_act:n_act+n_obj]
+        X_profA = X[n_act+n_obj:n_act+2*n_obj]
+        X_profS = X[n_act+2*n_obj:n_act+3*n_obj]
+        sim_name = cosine_similarity(X_act, X_name)
+        sim_profA = cosine_similarity(X_act, X_profA)
+        sim_profS = cosine_similarity(X_act, X_profS)
     else:
-        cons_obj = pd.DataFrame(columns=["Objetivo específico","N","Promedio","Mediana","p25","p75","std","% en Bajo"])
+        # Fallback Jaccard
+        act_tokens = [set(tokenize(t)) for t in df[col_act].tolist()]
+        obj_tokens = [set(tokenize(o)) for o in objetivos]
+        sim_name = jaccard_matrix(act_tokens, obj_tokens)
+        sim_profA = sim_name.copy()
+        sim_profS = sim_name.copy()
 
-    mejoras = detalle_full.loc[detalle_full["clasificacion"]!="sin_datos"].copy()
-    mejoras = mejoras.loc[mejoras["Δ p.p. (objetivo propuesto - actual)"] >= 15.0]
-    mejoras = mejoras.sort_values("Δ p.p. (objetivo propuesto - actual)", ascending=False)
-    mejoras = mejoras[[
-        "Actividad (seleccionada)",
-        "Objetivo específico",
-        "% actual (objetivo↔actividad)",
-        "Mejor objetivo propuesto",
-        "% si se ubica en objetivo propuesto",
-        "Δ p.p. (objetivo propuesto - actual)"
-    ]].rename(columns={
-        "Actividad (seleccionada)":"Actividad",
-        "Objetivo específico":"Obj. actual",
-        "% actual (objetivo↔actividad)":"% actual",
-        "Mejor objetivo propuesto":"Obj. sugerido",
-        "% si se ubica en objetivo propuesto":"% sugerido",
-        "Δ p.p. (objetivo propuesto - actual)":"Δ p.p."
+    # Overlap with objective name
+    overlap_to_name = np.zeros_like(sim_name)
+    for j, o in enumerate(objetivos):
+        for i, a in enumerate(df[col_act]):
+            overlap_to_name[i, j] = keyword_overlap_score(a, o)
+
+    # Balance penalty (over-assignment)
+    if col_obj_actual:
+        counts_actual = df[col_obj_actual].value_counts().reindex(objetivos, fill_value=0)
+    else:
+        counts_actual = pd.Series(0, index=objetivos)
+    max_c = counts_actual.max() if counts_actual.max() > 0 else 1
+    penalty = balance_lambda * (counts_actual.values / max_c)
+
+    base = (w_name*sim_name) + (w_profA*sim_profA) + (w_profS*sim_profS) + (w_overlap*overlap_to_name)
+    final_scores = base - penalty
+
+    top_idx = final_scores.argmax(axis=1)
+    top_scores = final_scores[np.arange(final_scores.shape[0]), top_idx]
+    if final_scores.shape[1] > 1:
+        second_idx = np.argsort(-final_scores, axis=1)[:, 1]
+        second_scores = final_scores[np.arange(final_scores.shape[0]), second_idx]
+    else:
+        second_idx = np.full(final_scores.shape[0], -1)
+        second_scores = np.zeros(final_scores.shape[0])
+
+    def conf(a, b):
+        if a <= 0: return 0.0
+        return float((a - b) / a)
+    confidences = np.array([conf(t, s) for t, s in zip(top_scores, second_scores)])
+
+    drivers = [top_overlap_terms(df.iloc[i][col_act], objetivos[top_idx[i]]) for i in range(len(df))]
+
+    out = pd.DataFrame({
+        "Actividad": df[col_act],
+        "Objetivo_actual": df[col_obj_actual] if col_obj_actual else "",
+        "Objetivo_sugerido_previo": df[col_obj_sug] if col_obj_sug else "",
+        "Objetivo_sugerido_mejorado": [objetivos[k] for k in top_idx],
+        "Segundo_mejor_objetivo": [objetivos[k] if k != -1 else "" for k in second_idx],
+        "Puntaje_mejorado": np.round(top_scores, 4),
+        "Puntaje_segundo": np.round(second_scores, 4),
+        "Confianza_%": np.round(confidences * 100, 1),
+        "Coincidencias_clave": drivers
     })
-    mejoras["% actual"] = mejoras["% actual"].round(1)
-    mejoras["% sugerido"] = mejoras["% sugerido"].round(1)
-    mejoras["Δ p.p."] = mejoras["Δ p.p."].round(1)
+    # Consistencia 0-100 (min-max)
+    p = out["Puntaje_mejorado"].values
+    p_min, p_max = float(np.min(p)), float(np.max(p))
+    out["Consistencia_estimada_%"] = np.round((p - p_min) / (p_max - p_min + 1e-9) * 100, 1)
 
-    dup = (df.assign(act_norm=df["_act_norm"])
-             .groupby("act_norm").size().reset_index(name="Repeticiones"))
-    dup = dup.loc[dup["Repeticiones"]>1].sort_values("Repeticiones", ascending=False)
-    dup = dup.rename(columns={"act_norm":"Actividad (normalizada)"})
+    # Resumen
+    resumen_actual = df[col_obj_actual].value_counts().rename_axis("Objetivo").reset_index(name="N_actual") if col_obj_actual else pd.DataFrame(columns=["Objetivo", "N_actual"])
+    resumen_prev = df[col_obj_sug].value_counts().rename_axis("Objetivo").reset_index(name="N_sugerido_prev") if col_obj_sug else pd.DataFrame(columns=["Objetivo", "N_sugerido_prev"])
+    resumen_mej = out["Objetivo_sugerido_mejorado"].value_counts().rename_axis("Objetivo").reset_index(name="N_sugerido_mejorado")
+    base = obj_catalog[["Objetivo"]].copy() if not obj_catalog.empty else resumen_mej[["Objetivo"]].copy()
+    resumen = base.merge(resumen_actual, on="Objetivo", how="left")\
+                  .merge(resumen_prev, on="Objetivo", how="left")\
+                  .merge(resumen_mej, on="Objetivo", how="left")\
+                  .fillna(0)
+    for c in ["N_actual","N_sugerido_prev","N_sugerido_mejorado"]:
+        if c in resumen.columns:
+            resumen[c] = resumen[c].astype(int)
+    if "N_sugerido_prev" in resumen.columns:
+        resumen["Delta_vs_prev"] = resumen["N_sugerido_mejorado"] - resumen["N_sugerido_prev"]
+    if "N_actual" in resumen.columns:
+        resumen["Delta_vs_actual"] = resumen["N_sugerido_mejorado"] - resumen["N_actual"]
 
-    control = (detalle_full.groupby("Objetivo general (1..n)").size()
-               .reset_index(name="Total filas")).sort_values("Objetivo general (1..n)")
-    control_total = pd.DataFrame([{"Objetivo general (1..n)":"TOTAL", "Total filas": int(total_cargadas)}])
-    control = pd.concat([control, control_total], ignore_index=True)
+    discrepancias = out.loc[out["Objetivo_sugerido_mejorado"] != out["Objetivo_sugerido_previo"]].copy()
+    return out, resumen, discrepancias
 
-    return resumen, detalle_full, cons_obj, mejoras, dup, control
+def to_excel_bytes(propuestas, resumen, discrepancias, obj_catalog):
+    import openpyxl  # ensure dependency
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        propuestas.to_excel(writer, index=False, sheet_name="Propuestas")
+        resumen.to_excel(writer, index=False, sheet_name="Resumen")
+        discrepancias.to_excel(writer, index=False, sheet_name="Discrepancias")
+        obj_catalog.to_excel(writer, index=False, sheet_name="Objetivos_catalogo")
+    buf.seek(0)
+    return buf
 
-def excel_consolidado(resumen: Dict[str,int], detalle_full: pd.DataFrame,
-                      cons_obj: pd.DataFrame, mejoras: pd.DataFrame, duplicadas: pd.DataFrame, control: pd.DataFrame):
-    from pandas import ExcelWriter
-    bio = io.BytesIO()
-    with ExcelWriter(bio, engine="openpyxl") as writer:
-        pd.DataFrame([resumen]).to_excel(writer, index=False, sheet_name="Resumen")
-        T = max(resumen.get("Total actividades (evaluadas)", 0), 1)
-        p = pd.DataFrame([{
-            "Fuente": resumen.get("Fuente",""),
-            "% Consistencia plena": round(resumen.get("Consistencia plena",0)/T,4),
-            "% Consistencia parcial": round(resumen.get("Consistencia parcial",0)/T,4),
-            "% Consistencia nula": round(resumen.get("Consistencia nula",0)/T,4),
-            "% Sin datos (sobre cargadas)": round(resumen.get("Sin datos",0)/max(resumen.get("Total actividades (cargadas)",1),1),4),
-        }])
-        p.to_excel(writer, index=False, sheet_name="Porcentajes")
-        cons_obj.to_excel(writer, index=False, sheet_name="Consistencia_por_objetivo")
-        mejoras.to_excel(writer, index=False, sheet_name="Potencial_reubicacion")
-        duplicadas.to_excel(writer, index=False, sheet_name="Duplicadas")
-        detalle_full.to_excel(writer, index=False, sheet_name="Actividades")
-        control.to_excel(writer, index=False, sheet_name="Control_conteo")
-    bio.seek(0)
-    return bio.getvalue()
+# -------------------- Streamlit UI --------------------
+st.set_page_config(page_title="Calculadora de consistencia PEI – Propuestas mejoradas", layout="wide")
+st.title("Calculadora de consistencia PEI – Propuestas de objetivo (versión mejorada)")
+st.caption("Asigna actividades a objetivos combinando similitud semántica (TF‑IDF), perfiles de objetivos, solapamiento léxico y balance por sobre-asignación.")
 
-# ---------- UI Streamlit (single-file) ----------
-st.set_page_config(page_title="Calculadora – Formulario Único", layout="wide")
-st.title("📊 Calculadora de Consistencia – Formulario Único (1 archivo)")
+with st.sidebar:
+    st.header("Parámetros de modelo")
+    w_name = st.slider("Peso: similitud con nombre del objetivo", 0.0, 1.0, 0.35, 0.05)
+    w_profA = st.slider("Peso: perfil de actividades actualmente en el objetivo", 0.0, 1.0, 0.30, 0.05)
+    w_profS = st.slider("Peso: perfil de actividades sugeridas previamente", 0.0, 1.0, 0.25, 0.05)
+    w_overlap = st.slider("Peso: solapamiento léxico", 0.0, 1.0, 0.10, 0.05)
+    balance_lambda = st.slider("Penalización por sobre-asignación (λ)", 0.0, 0.5, 0.12, 0.01)
+    st.markdown("---")
+    thr_auto = st.slider("Umbral de confianza para asignación automática (%)", 0, 100, 40, 1)
+    thr_review = st.slider("Umbral mínimo para sugerir (por debajo: requiere revisión) (%)", 0, 100, 20, 1)
 
-uploaded = st.file_uploader("Subí el **Formulario Único** (XLSX o CSV)", type=["xlsx","csv"])
-if not uploaded:
-    st.stop()
+st.subheader("1) Cargar archivo de actividades (Excel)")
+file = st.file_uploader("Subí el Excel con al menos: **Actividad**, **Obj. actual** (opcional), **Obj. sugerido** (opcional).", type=["xlsx","xls"])
 
-bio = io.BytesIO(uploaded.getvalue()); bio.name = uploaded.name
-if uploaded.name.lower().endswith(".xlsx"):
-    df = pd.read_excel(bio, engine="openpyxl")
+st.subheader("2) (Opcional) Catálogo de objetivos")
+cat_file = st.file_uploader("Podés subir un catálogo con columnas: **Objetivo** y **Descripción** para mejorar la semántica.", type=["xlsx","xls","csv"], key="cat")
+
+if file is not None:
+    df = pd.read_excel(file)
+    col_act, col_obj_actual, col_obj_sug = detect_columns(df)
+    if col_act is None:
+        st.error("No pude detectar la columna de actividad. Usá nombres como 'Actividad' o 'Descripción'.")
+        st.stop()
+    # Catalog
+    cat_df = None
+    if cat_file is not None:
+        try:
+            if cat_file.name.lower().endswith(".csv"):
+                cat_df = pd.read_csv(cat_file)
+            else:
+                cat_df = pd.read_excel(cat_file)
+        except Exception as e:
+            st.warning(f"No pude leer el catálogo de objetivos: {e}")
+            cat_df = None
+    obj_catalog = build_objective_catalog(df, col_obj_actual, col_obj_sug, cat_df=cat_df)
+    if obj_catalog.empty:
+        st.error("No pude construir el catálogo de objetivos. Asegurate de tener al menos una columna de objetivos (actual o sugerido) o subí un catálogo.")
+        st.stop()
+
+    st.info(f"Columnas detectadas → Actividad: **{col_act}** | Obj. actual: **{col_obj_actual}** | Obj. sugerido: **{col_obj_sug}**")
+    st.write("Catálogo de objetivos:", obj_catalog.head(10))
+
+    propuestas, resumen, discrepancias = score_and_recommend(
+        df, obj_catalog, col_act, col_obj_actual, col_obj_sug,
+        w_name=w_name, w_profA=w_profA, w_profS=w_profS, w_overlap=w_overlap, balance_lambda=balance_lambda
+    )
+
+    # Etiquetas de decisión por confianza
+    def etiqueta_conf(c):
+        if c >= thr_auto: return "Auto"
+        if c >= thr_review: return "Revisar"
+        return "Validación"
+    propuestas["Decisión"] = propuestas["Confianza_%"].apply(etiqueta_conf)
+
+    st.subheader("Resultados")
+    st.markdown("**Propuestas (vista)**")
+    st.dataframe(propuestas.head(50), use_container_width=True)
+
+    colA, colB = st.columns(2)
+    with colA:
+        st.markdown("**Discrepancias (difieren del sugerido previo)**")
+        st.dataframe(discrepancias, use_container_width=True, height=300)
+    with colB:
+        st.markdown("**Resumen por objetivo**")
+        st.dataframe(resumen, use_container_width=True, height=300)
+
+    # Export
+    buf = to_excel_bytes(propuestas, resumen, discrepancias, obj_catalog)
+    st.download_button(
+        label="Descargar Excel con todas las hojas",
+        data=buf,
+        file_name="Propuestas_objetivo_mejoradas.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    st.caption("Consejo: activá 'Solo discrepancias' en tus flujos de revisión para acelerar la validación humana en los casos con baja o media confianza.")
 else:
-    try:
-        df = pd.read_csv(bio, encoding="utf-8", sep=None, engine="python")
-    except Exception:
-        bio.seek(0); df = pd.read_csv(bio, encoding="latin-1", sep=None, engine="python")
-
-df = normalize_colnames(df)
-df = clean_rows(df)
-
-obj_default, act_default = detect_columns(df)
-st.subheader("Seleccioná columnas")
-c1, c2 = st.columns(2)
-with c1:
-    col_obj = st.selectbox("Columna de **Objetivo específico**", options=list(df.columns),
-                           index=(list(df.columns).index(obj_default) if obj_default in df.columns else 0))
-with c2:
-    col_act = st.selectbox("Columna de **Actividad**", options=list(df.columns),
-                           index=(list(df.columns).index(act_default) if act_default in df.columns else (1 if len(df.columns)>1 else 0)))
-
-total_valid = count_valid_pairs(df, col_obj, col_act)
-st.info(f"Total de actividades **cargadas**: {len(df)} | **evaluadas** (objetivo + actividad): {total_valid}")
-
-st.subheader("Vista previa")
-st.dataframe(df[[col_obj, col_act]].head(15), use_container_width=True)
-
-st.subheader("Umbrales de clasificación")
-c1, c2 = st.columns(2)
-with c1:
-    t_plena = st.slider("Umbral 'plena'", 70, 100, 88, 1)
-with c2:
-    t_parcial = st.slider("Umbral 'parcial'", 50, 90, 68, 1)
-
-if st.button("🔎 Realizar Análisis Completo de Consistencia"):
-    with st.spinner("Calculando consistencias y generando informe Excel…"):
-        resumen, detalle_full, cons_obj, mejoras, dup, control = analyze_independent(
-            df, uploaded.name, col_obj, col_act, thr_full=float(t_plena), thr_partial=float(t_parcial)
-        )
-
-    st.subheader("📊 Resumen")
-    st.write(resumen)
-
-    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    excel_bytes = excel_consolidado(resumen, detalle_full, cons_obj, mejoras, dup, control)
-
-    st.download_button("⬇️ Descargar EXCEL — informe_consistencia_pei_consolidado",
-                       data=excel_bytes,
-                       file_name=f"informe_consistencia_pei_consolidado_{ts}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-else:
-    st.warning("Cargá el archivo y tocá el botón para generar los informes.")
+    st.warning("Esperando archivo de actividades…")
